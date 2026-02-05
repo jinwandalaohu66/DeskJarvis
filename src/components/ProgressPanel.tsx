@@ -226,7 +226,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
       initial={false}
       animate={{ width: collapsed ? collapsedWidth : expandedWidth }}
       transition={panelTransition}
-      className="bg-white dark:bg-[#0a0a0a] border-l border-gray-200 dark:border-gray-800 flex flex-col h-full overflow-hidden"
+      className="bg-white dark:bg-[#0a0a0a] flex flex-col h-full overflow-hidden"
       style={{ flexShrink: 0 }}
     >
       {/* 顶部按钮区域 - 使用条件渲染 */}
