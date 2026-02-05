@@ -12,9 +12,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-// @ts-ignore - react-markdown types may have issues
 import ReactMarkdown from "react-markdown";
-// @ts-ignore
 import remarkGfm from "remark-gfm";
 import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult } from "../types";
 import { executeTask, isTauriEnvironment } from "../utils/tauri";
@@ -26,6 +24,9 @@ import {
   imagePreviewVariants,
   transitionFast
 } from "../utils/animations";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger('Chat');
 
 // 导入Tauri事件API
 let listenProgress: any = null;
@@ -108,8 +109,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // 组件加载时输出日志，确认控制台正常工作
   useEffect(() => {
-    console.log("[ChatInterface] 组件已加载");
-    console.log("[ChatInterface] Tauri环境:", isTauriEnvironment());
+    log.debug("[ChatInterface] 组件已加载");
+    log.debug("[ChatInterface] Tauri环境:", isTauriEnvironment());
     
     // 监听 Tauri 原生拖拽事件（获取完整文件路径）
     let unlistenDrop: (() => void) | null = null;
@@ -117,7 +118,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     if (isTauriEnvironment()) {
       import("@tauri-apps/api/event").then(({ listen }) => {
         listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
-          console.log("[拖拽] 收到文件:", event.payload.paths);
+          log.debug("[拖拽] 收到文件:", event.payload.paths);
           if (event.payload.paths && event.payload.paths.length > 0) {
             const path = event.payload.paths[0];
             setAttachedPath(path);
@@ -155,7 +156,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           loadChatMessages(parsedChats[0].id);
         }
       } catch (e) {
-        console.error("加载聊天历史失败:", e);
+        log.error("加载聊天历史失败:", e);
       }
     }
   }, []);
@@ -199,7 +200,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         }));
         setMessages(parsedMessages);
       } catch (e) {
-        console.error("加载消息失败:", e);
+        log.error("加载消息失败:", e);
         setMessages([]);
       }
     } else {
@@ -421,11 +422,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // 处理消息中的图片：当消息加载后，检查并加载图片
   useEffect(() => {
-    console.log("🔄 [图片处理] useEffect 触发，消息数量:", messages.length);
+    log.debug("🔄 [图片处理] useEffect 触发，消息数量:", messages.length);
     
     const processImagesForMessages = async () => {
       if (!isTauriEnvironment()) {
-        console.log("⚠️ [图片处理] 不在Tauri环境，跳过图片处理");
+        log.debug("⚠️ [图片处理] 不在Tauri环境，跳过图片处理");
         return;
       }
 
@@ -435,7 +436,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       for (const message of messages) {
         // 如果消息已经有图片数据，跳过
         if (message.images && message.images.length > 0) {
-          console.log(`✅ [图片处理] 消息 ${message.id} 已有图片数据`);
+          log.debug(`✅ [图片处理] 消息 ${message.id} 已有图片数据`);
           continue;
         }
 
@@ -453,7 +454,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           }
 
           if (screenshotPaths.length > 0) {
-            console.log(`🔄 [图片处理] 消息 ${message.id} 需要加载图片，路径:`, screenshotPaths);
+            log.debug(`🔄 [图片处理] 消息 ${message.id} 需要加载图片，路径:`, screenshotPaths);
             
             try {
               const fs = await import("@tauri-apps/plugin-fs");
@@ -465,17 +466,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   try {
                     const exists = await fs.exists(path);
                     if (!exists) {
-                      console.warn(`⚠️ [图片处理] 文件不存在，跳过: ${path}`);
+                      log.warn(`⚠️ [图片处理] 文件不存在，跳过: ${path}`);
                       continue; // 跳过不存在的文件，不显示错误
                     }
                   } catch (checkError) {
                     // 如果检查文件存在性失败，尝试直接读取（某些情况下 exists 可能不可用）
-                    console.log(`ℹ️ [图片处理] 无法检查文件存在性，尝试直接读取: ${path}`);
+                    log.debug(`ℹ️ [图片处理] 无法检查文件存在性，尝试直接读取: ${path}`);
                   }
                   
-                  console.log(`📖 [图片处理] 读取文件: ${path}`);
+                  log.debug(`📖 [图片处理] 读取文件: ${path}`);
                   const imageBytes = await fs.readFile(path);
-                  console.log(`✅ [图片处理] 文件读取成功，大小: ${imageBytes.length} 字节`);
+                  log.debug(`✅ [图片处理] 文件读取成功，大小: ${imageBytes.length} 字节`);
 
                   // 转换为 base64
                   let binaryString = '';
@@ -489,15 +490,15 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   const base64 = btoa(binaryString);
                   const dataUrl = `data:image/png;base64,${base64}`;
                   imageDataUrls.push(dataUrl);
-                  console.log(`✅ [图片处理] 图片转换成功，已添加到列表`);
+                  log.debug(`✅ [图片处理] 图片转换成功，已添加到列表`);
                 } catch (e: any) {
                   // 文件不存在或其他错误：静默处理，不显示错误日志
                   const errorMessage = e?.message || String(e);
                   if (errorMessage.includes("No such file") || errorMessage.includes("os error 2")) {
-                    console.warn(`⚠️ [图片处理] 文件不存在，跳过: ${path}`);
+                    log.warn(`⚠️ [图片处理] 文件不存在，跳过: ${path}`);
                   } else {
                     // 其他错误（权限问题等）才显示警告
-                    console.warn(`⚠️ [图片处理] 读取文件失败，跳过: ${path}`, errorMessage);
+                    log.warn(`⚠️ [图片处理] 读取文件失败，跳过: ${path}`, errorMessage);
                   }
                 }
               }
@@ -509,17 +510,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 };
                 messagesToUpdate.push(updatedMessage);
                 hasUpdates = true;
-                console.log(`✅ [图片处理] 消息 ${message.id} 图片加载完成`);
+                log.debug(`✅ [图片处理] 消息 ${message.id} 图片加载完成`);
               }
             } catch (e: any) {
-              console.error(`❌ [图片处理] 导入 fs 插件失败:`, e);
+              log.error(`❌ [图片处理] 导入 fs 插件失败:`, e);
             }
           }
         }
       }
 
       if (hasUpdates) {
-        console.log(`🔄 [图片处理] 更新 ${messagesToUpdate.length} 条消息的图片数据`);
+        log.debug(`🔄 [图片处理] 更新 ${messagesToUpdate.length} 条消息的图片数据`);
         setMessages((prev) => {
           const updated = prev.map((msg) => {
             const updatedMsg = messagesToUpdate.find((u) => u.id === msg.id);
@@ -539,7 +540,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // 停止当前任务
   const handleStop = () => {
-    console.log("🛑 [handleStop] 用户请求停止任务");
+    log.debug("🛑 [handleStop] 用户请求停止任务");
     isTaskCancelledRef.current = true;
     
     // 清理进度事件监听器
@@ -645,7 +646,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         });
         unlistenProgressRef.current = unlistenProgress;
       } catch (e) {
-        console.error("设置进度事件监听器失败:", e);
+        log.error("设置进度事件监听器失败:", e);
       }
     }
 
@@ -658,11 +659,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       content: "好的，让我来处理...",  // 初始内容
       timestamp: new Date(),
     };
-    console.log("✅ [handleSend] 创建AI消息，ID:", tempAssistantId);
+    log.debug("✅ [handleSend] 创建AI消息，ID:", tempAssistantId);
     setMessages((prev) => [...prev, initialAssistantMessage]);
 
     try {
-      console.log("🚀 [handleSend] 进入 try 块，准备执行任务");
+      log.debug("🚀 [handleSend] 进入 try 块，准备执行任务");
       // 构建上下文信息（包含之前创建的文件和附加的文件路径）
       const context: any = lastTaskContext ? {
         created_files: lastTaskContext.created_files || [],
@@ -672,7 +673,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       // 如果用户附加了文件/文件夹路径，添加到上下文中
       if (attachedPath) {
         context.attached_path = attachedPath;
-        console.log(`[上下文] 用户附加了路径: ${attachedPath}`);
+        log.debug(`[上下文] 用户附加了路径: ${attachedPath}`);
       }
       
       // 添加聊天历史到上下文（只包含用户和AI的消息，排除系统消息）
@@ -686,28 +687,28 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       
       if (chatHistory.length > 0) {
         context.chat_history = chatHistory;
-        console.log(`[上下文] 添加聊天历史: ${chatHistory.length} 条消息`);
+        log.debug(`[上下文] 添加聊天历史: ${chatHistory.length} 条消息`);
       }
       
       // 调用Tauri命令执行任务（传递上下文）
       // 如果任务已被取消，不执行
       if (isTaskCancelledRef.current) {
-        console.log("🛑 [handleSend] 任务已被取消，跳过执行");
+        log.debug("🛑 [handleSend] 任务已被取消，跳过执行");
         return;
       }
       
-      console.log("🚀 [handleSend] 准备调用 executeTask");
-      console.log("🚀 [handleSend] 指令:", instruction);
-      console.log("🚀 [handleSend] 上下文:", context);
-      console.log("🚀 [handleSend] Tauri环境:", isTauriEnvironment());
+      log.debug("🚀 [handleSend] 准备调用 executeTask");
+      log.debug("🚀 [handleSend] 指令:", instruction);
+      log.debug("🚀 [handleSend] 上下文:", context);
+      log.debug("🚀 [handleSend] Tauri环境:", isTauriEnvironment());
       
       let result;
       try {
         result = await executeTask(instruction, Object.keys(context).length > 0 ? context : null);
-        console.log("✅ [handleSend] executeTask 调用成功，结果:", result);
+        log.debug("✅ [handleSend] executeTask 调用成功，结果:", result);
       } catch (executeError: any) {
-        console.error("❌ [handleSend] executeTask 调用失败:", executeError);
-        console.error("❌ [handleSend] 错误详情:", {
+        log.error("❌ [handleSend] executeTask 调用失败:", executeError);
+        log.error("❌ [handleSend] 错误详情:", {
           message: executeError?.message,
           stack: executeError?.stack,
           name: executeError?.name
@@ -717,7 +718,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       
       // 检查任务是否在执行过程中被取消
       if (isTaskCancelledRef.current) {
-        console.log("🛑 [handleSend] 任务在执行过程中被取消");
+        log.debug("🛑 [handleSend] 任务在执行过程中被取消");
         return;
       }
 
@@ -734,18 +735,18 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
 
       // 检查是否有截图结果，提取图片路径
-      console.log("🔍 [图片预览] 开始检查任务结果...");
-      console.log("🔍 [图片预览] 任务结果:", JSON.stringify(result, null, 2));
+      log.debug("🔍 [图片预览] 开始检查任务结果...");
+      log.debug("🔍 [图片预览] 任务结果:", JSON.stringify(result, null, 2));
       
       const screenshotPaths: string[] = [];
       if (result.steps && result.steps.length > 0) {
-        console.log(`🔍 [图片预览] 找到 ${result.steps.length} 个步骤`);
+        log.debug(`🔍 [图片预览] 找到 ${result.steps.length} 个步骤`);
         for (const stepItem of result.steps) {
           const stepType = stepItem.step?.type;
           const stepResult = stepItem.result;
           const stepData = stepResult?.data;
           
-          console.log("🔍 [图片预览] 检查步骤:", { 
+          log.debug("🔍 [图片预览] 检查步骤:", { 
             stepType, 
             success: stepResult?.success, 
             path: stepData?.path,
@@ -757,52 +758,52 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             stepResult?.success &&
             stepData?.path
           ) {
-            console.log("✅ [图片预览] 找到截图路径:", stepData.path);
+            log.debug("✅ [图片预览] 找到截图路径:", stepData.path);
             screenshotPaths.push(stepData.path);
           }
         }
       } else {
-        console.log("⚠️ [图片预览] 没有找到步骤数据");
+        log.debug("⚠️ [图片预览] 没有找到步骤数据");
       }
       
-      console.log(`📊 [图片预览] 提取的截图路径数量: ${screenshotPaths.length}`);
-      console.log(`📊 [图片预览] 截图路径列表:`, screenshotPaths);
+      log.debug(`📊 [图片预览] 提取的截图路径数量: ${screenshotPaths.length}`);
+      log.debug(`📊 [图片预览] 截图路径列表:`, screenshotPaths);
 
       // 如果有截图，读取图片文件并转换为base64
       const imageDataUrls: string[] = [];
       const isTauri = isTauriEnvironment();
-      console.log(`🔍 [图片预览] Tauri环境检测: ${isTauri}`);
-      console.log(`🔍 [图片预览] window对象:`, typeof window !== "undefined" ? "存在" : "不存在");
-      console.log(`🔍 [图片预览] __TAURI__:`, typeof window !== "undefined" && "__TAURI__" in window);
-      console.log(`🔍 [图片预览] __TAURI_INTERNALS__:`, typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
+      log.debug(`🔍 [图片预览] Tauri环境检测: ${isTauri}`);
+      log.debug(`🔍 [图片预览] window对象:`, typeof window !== "undefined" ? "存在" : "不存在");
+      log.debug(`🔍 [图片预览] __TAURI__:`, typeof window !== "undefined" && "__TAURI__" in window);
+      log.debug(`🔍 [图片预览] __TAURI_INTERNALS__:`, typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
       
       if (screenshotPaths.length > 0) {
         if (isTauri) {
-          console.log("✅ [图片预览] 开始读取截图文件（Tauri环境）");
+          log.debug("✅ [图片预览] 开始读取截图文件（Tauri环境）");
           try {
             const fs = await import("@tauri-apps/plugin-fs");
-            console.log("✅ [图片预览] fs 模块导入成功");
-            console.log("✅ [图片预览] fs 模块内容:", Object.keys(fs));
+            log.debug("✅ [图片预览] fs 模块导入成功");
+            log.debug("✅ [图片预览] fs 模块内容:", Object.keys(fs));
             
             for (const path of screenshotPaths) {
               try {
-                console.log(`📖 [图片预览] 开始读取文件: ${path}`);
+                log.debug(`📖 [图片预览] 开始读取文件: ${path}`);
                 
                 // 先检查文件是否存在
                 try {
                   const exists = await fs.exists(path);
                   if (!exists) {
-                    console.warn(`⚠️ [图片预览] 文件不存在，跳过: ${path}`);
+                    log.warn(`⚠️ [图片预览] 文件不存在，跳过: ${path}`);
                     continue; // 跳过不存在的文件，不显示错误
                   }
                 } catch (checkError) {
                   // 如果检查文件存在性失败，尝试直接读取（某些情况下 exists 可能不可用）
-                  console.log(`ℹ️ [图片预览] 无法检查文件存在性，尝试直接读取: ${path}`);
+                  log.debug(`ℹ️ [图片预览] 无法检查文件存在性，尝试直接读取: ${path}`);
                 }
                 
                 // Tauri 2.0 fs 插件：readFile 支持绝对路径
                 const imageBytes = await fs.readFile(path);
-                console.log(`✅ [图片预览] 文件读取成功，大小: ${imageBytes.length} 字节`);
+                log.debug(`✅ [图片预览] 文件读取成功，大小: ${imageBytes.length} 字节`);
                 
                 // 转换为 base64
                 let binaryString = '';
@@ -818,39 +819,39 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 const base64 = btoa(binaryString);
                 const dataUrl = `data:image/png;base64,${base64}`;
                 imageDataUrls.push(dataUrl);
-                console.log(`✅ [图片预览] 图片已添加到预览列表: ${path}`);
+                log.debug(`✅ [图片预览] 图片已添加到预览列表: ${path}`);
               } catch (e: any) {
                 // 文件不存在或其他错误：静默处理，不显示错误日志
                 // 只在开发模式下显示详细错误信息
                 const errorMessage = e?.message || String(e);
                 if (errorMessage.includes("No such file") || errorMessage.includes("os error 2")) {
-                  console.warn(`⚠️ [图片预览] 文件不存在，跳过: ${path}`);
+                  log.warn(`⚠️ [图片预览] 文件不存在，跳过: ${path}`);
                 } else {
                   // 其他错误（权限问题等）才显示警告
-                  console.warn(`⚠️ [图片预览] 读取文件失败，跳过: ${path}`, errorMessage);
+                  log.warn(`⚠️ [图片预览] 读取文件失败，跳过: ${path}`, errorMessage);
                 }
               }
             }
           } catch (e: any) {
-            console.error("❌ [图片预览] 导入 fs 插件失败:", e);
-            console.error("❌ [图片预览] 错误详情:", {
+            log.error("❌ [图片预览] 导入 fs 插件失败:", e);
+            log.error("❌ [图片预览] 错误详情:", {
               message: e?.message,
               stack: e?.stack,
               name: e?.name
             });
           }
         } else {
-          console.warn("⚠️ [图片预览] 不在Tauri环境，无法读取文件");
+          log.warn("⚠️ [图片预览] 不在Tauri环境，无法读取文件");
         }
       } else {
-        console.log("⚠️ [图片预览] 没有找到截图路径");
+        log.debug("⚠️ [图片预览] 没有找到截图路径");
       }
       
-      console.log(`📊 [图片预览] 最终图片数据URL数量: ${imageDataUrls.length}`);
+      log.debug(`📊 [图片预览] 最终图片数据URL数量: ${imageDataUrls.length}`);
       if (imageDataUrls.length > 0) {
-        console.log(`✅ [图片预览] 图片数据URL已准备就绪，将添加到消息中`);
+        log.debug(`✅ [图片预览] 图片数据URL已准备就绪，将添加到消息中`);
       } else {
-        console.warn(`⚠️ [图片预览] 没有成功加载任何图片`);
+        log.warn(`⚠️ [图片预览] 没有成功加载任何图片`);
       }
 
       // 构建简洁的总结消息
@@ -956,7 +957,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         messageContent += paths;
       }
 
-      console.log("[handleSend] 最终消息:", messageContent);
+      log.debug("[handleSend] 最终消息:", messageContent);
 
       // ✅ 重置累积内容
       accumulatedContentRef.current = "";
@@ -966,7 +967,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       
       // 确保消息内容不为空
       const finalMessageContent = messageContent?.trim() || (result.success ? "任务执行完成" : "任务执行失败");
-      console.log("📝 [handleSend] 准备更新最终消息，内容长度:", finalMessageContent.length);
+      log.debug("📝 [handleSend] 准备更新最终消息，内容长度:", finalMessageContent.length);
       
       setMessages((prev) => {
         // 确保能找到AI消息并更新
@@ -976,7 +977,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         
         if (!hasAssistantMessage && currentAssistantMessageIdRef.current) {
           // 如果找不到临时消息，直接添加新消息
-          console.warn("⚠️ [handleSend] 未找到临时AI消息，直接添加最终消息");
+          log.warn("⚠️ [handleSend] 未找到临时AI消息，直接添加最终消息");
           return [
             ...prev,
             {
@@ -992,7 +993,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         
         const updated = prev.map((msg) => {
           if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
-            console.log("✅ [handleSend] 找到并更新AI消息");
+            log.debug("✅ [handleSend] 找到并更新AI消息");
             return {
               ...msg,
               id: finalAssistantId,
@@ -1007,7 +1008,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         // 验证更新后的消息
         const finalMsg = updated.find(m => m.id === finalAssistantId);
         if (!finalMsg || !finalMsg.content || !finalMsg.content.trim()) {
-          console.error("❌ [handleSend] 更新后的消息内容为空！");
+          log.error("❌ [handleSend] 更新后的消息内容为空！");
         }
         
         return updated;
@@ -1036,7 +1037,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           if (stepType === "screenshot_desktop" && stepData?.path) {
             contextFiles.push(stepData.path);
             latestFile = stepData.path; // 总是更新为最新的截图
-            console.log(`✅ [上下文] 截图保存: ${stepData.path}，更新最新文件`);
+            log.debug(`✅ [上下文] 截图保存: ${stepData.path}，更新最新文件`);
           }
           // 收集重命名/移动操作的文件路径（优先使用新路径）
           if (stepType === "file_rename" || stepType === "file_move") {
@@ -1046,7 +1047,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             if (newPath) {
               contextFiles.push(newPath);
               latestFile = newPath; // 重命名/移动后的新路径
-              console.log(`✅ [上下文] 重命名/移动: ${oldPath} → ${newPath}`);
+              log.debug(`✅ [上下文] 重命名/移动: ${oldPath} → ${newPath}`);
             } else if (oldPath) {
               contextFiles.push(oldPath);
               latestFile = oldPath;
@@ -1086,10 +1087,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             last_created_file: finalLatestFile,
             timestamp: Date.now(),
           });
-          console.log(`✅ [上下文] 更新上下文: 最新文件 = ${finalLatestFile}, 所有文件 = [${contextFiles.join(", ")}]`);
+          log.debug(`✅ [上下文] 更新上下文: 最新文件 = ${finalLatestFile}, 所有文件 = [${contextFiles.join(", ")}]`);
         } else {
           // 如果没有收集到文件，但之前有上下文，保持之前的上下文（不要清空）
-          console.log(`⚠️ [上下文] 本次任务没有操作文件，保持之前的上下文`);
+          log.debug(`⚠️ [上下文] 本次任务没有操作文件，保持之前的上下文`);
         }
       }
       
@@ -1103,7 +1104,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     } catch (error) {
       // 如果任务已被取消，不显示错误
       if (isTaskCancelledRef.current) {
-        console.log("🛑 [handleSend] 任务已取消，忽略错误");
+        log.debug("🛑 [handleSend] 任务已取消，忽略错误");
         return;
       }
       
@@ -1197,7 +1198,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     const eventType = event.type;
     const eventData = event.data || {};
 
-    console.log("[进度事件]", eventType, eventData);
+    log.debug("[进度事件]", eventType, eventData);
 
     switch (eventType) {
       // ========== 思考阶段 ==========
@@ -1212,7 +1213,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       // ========== 计划就绪 ==========
       case "plan_ready":
         const steps = eventData.steps || [];
-        console.log("[plan_ready] 收到步骤:", steps.length, "个");
+        log.debug("[plan_ready] 收到步骤:", steps.length, "个");
         
         // 显示AI的计划内容
         const planContent = eventData.content || `我来处理，共 ${steps.length} 个步骤...`;
@@ -1225,7 +1226,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             step,
             result: undefined,
           }));
-          console.log("[plan_ready] 设置步骤到右侧面板:", initialSteps);
+          log.debug("[plan_ready] 设置步骤到右侧面板:", initialSteps);
           setCurrentSteps(initialSteps);
           // onStepsChange 由 useEffect 自动同步
         }
@@ -1370,14 +1371,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
       // ========== 请求用户输入（登录、验证码） ==========
       case "request_input":
-        console.log("[request_input] 收到用户输入请求:", eventData);
+        log.debug("[request_input] 收到用户输入请求:", eventData);
         setUserInputRequest(eventData as InputRequest);
         addLog("info", `等待用户输入: ${eventData.title || "请输入"}`);
         break;
 
       // ========== 多代理协作事件 ==========
       case "crew_started":
-        console.log("[crew_started] 多代理协作开始:", eventData);
+        log.debug("[crew_started] 多代理协作开始:", eventData);
         updateStatus("multi_agent");
         setExecutionMode("multi-agent");
         const agents = eventData.agents || [];
@@ -1387,7 +1388,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       case "agent_progress":
         const agentName = eventData.agent || "Agent";
         const agentMessage = eventData.message || "";
-        console.log(`[agent_progress] ${agentName}: ${agentMessage}`);
+        log.debug(`[agent_progress] ${agentName}: ${agentMessage}`);
         setActiveAgent(agentName);
         addLogWithAgent("info", agentMessage, agentName);
         // 更新 AI 消息
@@ -1396,7 +1397,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         break;
 
       case "crew_completed":
-        console.log("[crew_completed] 多代理协作完成:", eventData);
+        log.debug("[crew_completed] 多代理协作完成:", eventData);
         const crewSuccess = eventData.success;
         const crewResult = eventData.result || "";
         const crewDuration = eventData.duration || 0;
@@ -1413,13 +1414,13 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         break;
 
       default:
-        console.log("[未处理事件]", eventType, eventData);
+        log.debug("[未处理事件]", eventType, eventData);
     }
   };
 
   // 处理用户输入提交（登录、验证码）
   const handleUserInputSubmit = async (requestId: string, values: Record<string, string>) => {
-    console.log("[用户输入] 提交:", requestId, values);
+    log.debug("[用户输入] 提交:", requestId, values);
     try {
       if (tauriInvoke) {
         await tauriInvoke("submit_user_input", { requestId, values });
@@ -1427,14 +1428,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       setUserInputRequest(null);
       addLog("success", "已提交用户输入");
     } catch (error) {
-      console.error("[用户输入] 提交失败:", error);
+      log.error("[用户输入] 提交失败:", error);
       addLog("error", `提交失败: ${error}`);
     }
   };
 
   // 处理用户输入取消
   const handleUserInputCancel = async (requestId: string) => {
-    console.log("[用户输入] 取消:", requestId);
+    log.debug("[用户输入] 取消:", requestId);
     try {
       if (tauriInvoke) {
         await tauriInvoke("cancel_user_input", { requestId });
@@ -1442,7 +1443,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       setUserInputRequest(null);
       addLog("info", "用户取消了输入");
     } catch (error) {
-      console.error("[用户输入] 取消失败:", error);
+      log.error("[用户输入] 取消失败:", error);
     }
   };
 
@@ -1533,7 +1534,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       await navigator.clipboard.writeText(content);
       onCopySuccess();
     } catch (error) {
-      console.error("复制失败:", error);
+      log.error("复制失败:", error);
       // 降级方案：使用传统方法
       const textArea = document.createElement("textarea");
       textArea.value = content;
@@ -1545,7 +1546,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         document.execCommand("copy");
         onCopySuccess();
       } catch (err) {
-        console.error("复制失败（降级方案）:", err);
+        log.error("复制失败（降级方案）:", err);
         // 显示失败提示
         setCopyToast({ show: true, message: "复制失败" });
         setTimeout(() => {
@@ -1560,7 +1561,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const handleUndo = async (taskResult: TaskResult) => {
     try {
       if (!taskResult?.steps || taskResult.steps.length === 0) {
-        console.warn("没有可撤回的操作");
+        log.warn("没有可撤回的操作");
         addMessage({
           id: Date.now().toString(),
           role: "system",
@@ -1757,7 +1758,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
         // 检查任务是否被取消
         if (isTaskCancelledRef.current) {
-          console.log("🛑 [handleUndo] 任务已被取消，跳过执行");
+          log.debug("🛑 [handleUndo] 任务已被取消，跳过执行");
           return;
         }
 
@@ -1765,7 +1766,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
         // 检查任务是否在执行过程中被取消
         if (isTaskCancelledRef.current) {
-          console.log("🛑 [handleUndo] 任务在执行过程中被取消");
+          log.debug("🛑 [handleUndo] 任务在执行过程中被取消");
           return;
         }
 
@@ -1789,11 +1790,11 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       } catch (error: any) {
         // 如果任务已被取消，不显示错误
         if (isTaskCancelledRef.current) {
-          console.log("🛑 [handleUndo] 任务已取消，忽略错误");
+          log.debug("🛑 [handleUndo] 任务已取消，忽略错误");
           return;
         }
 
-        console.error("撤回操作失败:", error);
+        log.error("撤回操作失败:", error);
         addLog("error", `撤回失败: ${error.message || error}`);
         updateStatus("error");
         
@@ -1807,7 +1808,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
     } catch (outerError: any) {
       // 捕获所有未预期的错误，防止组件崩溃
-      console.error("撤回操作发生未预期错误:", outerError);
+      log.error("撤回操作发生未预期错误:", outerError);
       addLog("error", `撤回操作失败: ${outerError.message || outerError}`);
       updateStatus("idle");
       
@@ -2073,7 +2074,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       className="mt-3 space-y-2 gpu-accelerated"
                     >
                       {message.images.map((imageDataUrl, idx) => {
-                        console.log(`🖼️ 渲染图片 ${idx + 1}, 数据URL长度: ${imageDataUrl.length}`);
+                        log.debug(`🖼️ 渲染图片 ${idx + 1}, 数据URL长度: ${imageDataUrl.length}`);
                         return (
                           <div
                             key={idx}
@@ -2105,10 +2106,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                               alt={`截图 ${idx + 1}`}
                               className="max-w-full h-auto block group-hover:opacity-90 transition-opacity"
                               onError={(e) => {
-                                console.error(`❌ 图片加载失败 ${idx + 1}:`, e);
+                                log.error(`❌ 图片加载失败 ${idx + 1}:`, e);
                               }}
                               onLoad={() => {
-                                console.log(`✅ 图片加载成功 ${idx + 1}`);
+                                log.debug(`✅ 图片加载成功 ${idx + 1}`);
                               }}
                             />
                             <div className="px-3 py-2 bg-gray-50 dark:bg-gray-900/50 text-xs text-gray-500 dark:text-gray-400 text-center">
@@ -2121,7 +2122,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   ) : (
                     // 如果有截图路径但图片未加载，显示提示
                     message.taskResult && message.taskResult.steps && (() => {
-                      console.log("🔍 [渲染] 检查是否有截图路径但图片未加载");
+                      log.debug("🔍 [渲染] 检查是否有截图路径但图片未加载");
                       const paths: string[] = [];
                       for (const stepItem of message.taskResult.steps) {
                         if (
@@ -2132,7 +2133,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                           paths.push(stepItem.result.data.path);
                         }
                       }
-                      console.log(`🔍 [渲染] 找到 ${paths.length} 个截图路径，但图片未加载`);
+                      log.debug(`🔍 [渲染] 找到 ${paths.length} 个截图路径，但图片未加载`);
                       return paths.length > 0 ? (
                         <motion.div
                           initial={{ opacity: 0 }}

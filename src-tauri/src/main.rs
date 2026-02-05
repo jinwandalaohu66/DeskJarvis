@@ -5,7 +5,11 @@ use std::process::{Command, Stdio};
 use std::path::PathBuf;
 use std::io::{BufRead, BufReader};
 use serde::{Deserialize, Serialize};
-use tauri::{Window, Emitter};
+use tauri::{
+    Window, Emitter, Manager,
+    tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent},
+    menu::{MenuBuilder, MenuItemBuilder},
+};
 
 /// 任务执行结果
 #[derive(Debug, Serialize, Deserialize)]
@@ -390,6 +394,68 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            // 创建托盘菜单
+            let show_item = MenuItemBuilder::new("显示主窗口")
+                .id("show")
+                .build(app)?;
+            let hide_item = MenuItemBuilder::new("隐藏到后台")
+                .id("hide")
+                .build(app)?;
+            let quit_item = MenuItemBuilder::new("退出 DeskJarvis")
+                .id("quit")
+                .build(app)?;
+            
+            let menu = MenuBuilder::new(app)
+                .item(&show_item)
+                .item(&hide_item)
+                .separator()
+                .item(&quit_item)
+                .build()?;
+            
+            // 创建系统托盘图标
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .tooltip("DeskJarvis - AI 桌面助手")
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 点击托盘图标显示/隐藏窗口
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+            
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             execute_task, 
             get_config, 
