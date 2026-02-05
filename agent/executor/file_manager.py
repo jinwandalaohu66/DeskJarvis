@@ -219,6 +219,8 @@ class FileManager:
                 return self._write_file(params)
             elif step_type == "file_read":
                 return self._read_file(params)
+            elif step_type == "file_delete":
+                return self._delete_file(params)
             else:
                 raise FileManagerError(f"未知的文件操作类型: {step_type}")
                 
@@ -843,8 +845,20 @@ class FileManager:
         
         target_dir = Path(target_dir_str)
         
-        # 如果是相对路径，相对于用户主目录
-        if not target_dir.is_absolute():
+        # 如果只是文件夹名（不包含路径分隔符），尝试智能搜索
+        if "/" not in target_dir_str and "\\" not in target_dir_str and not target_dir_str.startswith("~"):
+            logger.info(f"检测到目标文件夹名格式，开始智能搜索: {target_dir_str}")
+            found_folder = self._find_folder(target_dir_str)
+            if found_folder:
+                target_dir = found_folder
+                logger.info(f"找到目标文件夹: {target_dir}")
+            else:
+                raise FileManagerError(
+                    f"未找到目标文件夹: {target_dir_str}。"
+                    f"请提供完整路径，如 '~/Desktop/{target_dir_str}' 或 '/Users/username/Desktop/{target_dir_str}'"
+                )
+        # 如果是相对路径（包含路径分隔符但不是绝对路径），相对于用户主目录
+        elif not target_dir.is_absolute() and ("/" in target_dir_str or "\\" in target_dir_str):
             target_dir = Path.home() / target_dir
         
         target_dir = target_dir.resolve()
@@ -1704,3 +1718,70 @@ class FileManager:
         except Exception as e:
             logger.error(f"写入文件失败: {e}", exc_info=True)
             raise FileManagerError(f"写入文件失败: {e}")
+    
+    def _delete_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        删除文件或文件夹
+        
+        Args:
+            params: 包含：
+                - file_path: 文件/文件夹路径（必需）
+        
+        Returns:
+            删除结果
+        """
+        file_path_str = params.get("file_path", "")
+        
+        if not file_path_str:
+            raise FileManagerError("缺少file_path参数")
+        
+        # 处理 ~ 符号
+        if file_path_str.startswith("~/"):
+            file_path_str = str(Path.home() / file_path_str[2:])
+        elif file_path_str.startswith("~"):
+            file_path_str = str(Path.home() / file_path_str[1:])
+        
+        file_path = Path(file_path_str)
+        
+        # 如果只是文件名，尝试智能搜索
+        if "/" not in file_path_str and "\\" not in file_path_str and not file_path_str.startswith("~"):
+            found_file = self._find_file(file_path_str)
+            if found_file:
+                file_path = found_file
+            else:
+                raise FileManagerError(f"文件不存在: {file_path_str}")
+        
+        # 如果是相对路径，相对于用户主目录
+        elif not file_path.is_absolute():
+            file_path = Path.home() / file_path
+        
+        file_path = file_path.resolve()
+        
+        # 安全：验证路径
+        file_path = self._validate_path(file_path)
+        
+        if not file_path.exists():
+            raise FileManagerError(f"文件/文件夹不存在: {file_path}")
+        
+        try:
+            if file_path.is_file():
+                file_path.unlink()
+                logger.info(f"✅ 已删除文件: {file_path}")
+                return {
+                    "success": True,
+                    "message": "已删除文件: " + str(file_path),
+                    "data": {"path": str(file_path), "type": "file"}
+                }
+            elif file_path.is_dir():
+                shutil.rmtree(file_path)
+                logger.info(f"✅ 已删除文件夹: {file_path}")
+                return {
+                    "success": True,
+                    "message": "已删除文件夹: " + str(file_path),
+                    "data": {"path": str(file_path), "type": "folder"}
+                }
+            else:
+                raise FileManagerError(f"无法识别的文件类型: {file_path}")
+        except Exception as e:
+            logger.error(f"删除失败: {e}", exc_info=True)
+            raise FileManagerError(f"删除失败: {e}")

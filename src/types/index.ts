@@ -50,7 +50,7 @@ export interface ChatMessage {
 /**
  * AI提供商类型
  */
-export type AIProvider = "claude" | "openai" | "deepseek" | "grok";
+export type AIProvider = "claude" | "openai" | "deepseek" | "grok" | "anthropic";
 
 /**
  * 应用配置
@@ -67,7 +67,7 @@ export interface AppConfig {
 /**
  * 任务状态
  */
-export type TaskStatus = "idle" | "planning" | "executing" | "completed" | "error";
+export type TaskStatus = "idle" | "planning" | "executing" | "completed" | "error" | "reflecting" | "multi_agent";
 
 /**
  * 日志条目
@@ -76,4 +76,25 @@ export interface LogEntry {
   timestamp: Date;
   level: "info" | "warning" | "error" | "success";
   message: string;
+  /** 来源 Agent（多代理模式） */
+  agent?: string;
 }
+
+/**
+ * Agent 类型（多代理协作）
+ */
+export type AgentType = "Planner" | "Executor" | "Reflector" | "Reviser" | "Summarizer" | "System" | "Crew";
+
+/**
+ * Agent 进度事件
+ */
+export interface AgentProgress {
+  agent: AgentType;
+  message: string;
+  data?: Record<string, any>;
+}
+
+/**
+ * 多代理执行模式
+ */
+export type ExecutionMode = "single-agent" | "multi-agent";

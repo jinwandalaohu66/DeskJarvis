@@ -1,109 +1,163 @@
-# DeskJarvis - 开源桌面AI智能助手
+# 🤖 DeskJarvis - AI 桌面智能助手
 
-一个轻量级、本地运行的AI Agent桌面应用。用自然语言聊天，就能让电脑自动帮你干活：下载文件、整理资料、浏览器操作等。
+<p align="center">
+  <img src="src-tauri/icons/icon.png" alt="DeskJarvis Logo" width="128" height="128">
+</p>
 
-**灵感来源**：想做一个“本地JARVIS”（钢铁侠助手），专治手动下载、文件乱七八糟的痛点。比QoderWork/OpenClaw更简单、更隐私、无需复杂配置！
+<p align="center">
+  <strong>用自然语言控制电脑，让 AI 成为你的私人助理</strong>
+</p>
 
-## 为什么用DeskJarvis？
-- **零门槛**：一键安装，填个API Key就能用（支持Claude/GPT）。
-- **不干扰**：独立浏览器操作，不抢你的鼠标/桌面。
-- **隐私强**：全本地执行，你的数据不上传。
-- **实用第一**：专注高频场景，如“帮我下载Python最新版并解压整理”。
-- **完全开源**：免费无限用，想改就改（GPLv3协议）。
+<p align="center">
+  <a href="#-功能特性">功能特性</a> •
+  <a href="#-快速开始">快速开始</a> •
+  <a href="#-技术架构">技术架构</a> •
+  <a href="#-开发文档">开发文档</a>
+</p>
 
-## 核心功能（MVP版本）
-- 自然语言指令聊天（例如：“从官网下载最新Chrome安装包，保存到下载文件夹并分类”）
-- 自动浏览器下载 + 文件整理（重命名、分类、去重）
-- 安全沙盒（只操作指定文件夹，操作前弹窗确认）
-- （后续）远程控制（手机Telegram发指令，让电脑干活）
+---
 
-## 快速开始
+## ✨ 功能特性
 
-### 命令行版本（当前可用）
+### 🎯 核心功能
+- **自然语言交互** - 像聊天一样控制电脑，无需学习命令
+- **智能任务规划** - AI 自动分解复杂任务，逐步执行
+- **自我反思修正** - 执行失败自动分析原因，调整方案重试
+- **安全沙盒执行** - 所有操作限制在指定目录，保护你的数据
 
-DeskJarvis目前提供命令行版本用于原型验证和测试。
+### 🛠️ 支持的操作
 
-#### 1. 安装依赖
+| 类别 | 功能 |
+|------|------|
+| 📁 文件管理 | 创建、删除、重命名、移动、搜索、整理文件 |
+| 🌐 浏览器自动化 | 打开网页、搜索、点击、填写表单、下载文件 |
+| 📸 桌面截图 | 截取桌面截图并保存 |
+| 📊 数据可视化 | 自动生成图表（饼图、柱状图、折线图等） |
+| 🔊 系统控制 | 音量调节、通知发送、剪贴板操作 |
+| 📝 文本处理 | AI 翻译、总结、润色、纠错 |
+| 🖼️ 图片处理 | 压缩、调整大小、格式转换 |
+| ⏰ 定时任务 | 设置提醒和定时执行 |
+| 📋 任务历史 | 查看历史记录，收藏常用任务 |
+
+### 🧠 智能特性
+- **增强版代码解释器** - AI 可以编写并执行 Python 代码
+- **自动安装依赖** - 缺少的 Python 包自动安装
+- **智能错误修复** - 语法错误自动修正，失败自动重试
+- **长期记忆系统** - 记住你的偏好、习惯和历史操作
+- **上下文理解** - 理解"这张图片"、"刚才的文件"等指代
+
+## 🚀 快速开始
+
+### 环境要求
+- **macOS** 12.0+ / **Windows** 10+ / **Linux**
+- **Node.js** 18+
+- **Python** 3.11+
+- **Rust** (用于 Tauri 编译)
+
+### 安装步骤
 
 ```bash
-# 运行快速设置脚本（推荐）
-./setup.sh
+# 1. 克隆项目
+git clone https://github.com/YOUR_USERNAME/DeskJarvis.git
+cd DeskJarvis
 
-# 或手动安装
+# 2. 安装前端依赖
+npm install
+
+# 3. 安装 Python 依赖
 pip install -r requirements.txt
 playwright install chromium
+
+# 4. 启动开发模式
+npm run tauri:dev
 ```
 
-#### 2. 配置API密钥
+### 配置 API Key
 
-首次运行会自动创建配置文件 `~/.deskjarvis/config.json`，编辑并设置你的Claude API密钥：
+首次启动后，点击左下角 ⚙️ 设置图标，配置你的 AI API：
 
-```json
-{
-  "api_key": "your-claude-api-key-here",
-  "model": "claude-3-5-sonnet-20241022",
-  "sandbox_path": "~/.deskjarvis/sandbox"
-}
+| 提供商 | 推荐模型 | 说明 |
+|--------|----------|------|
+| Claude | claude-3-5-sonnet | 最智能，推荐 |
+| DeepSeek | deepseek-chat | 性价比高，中文好 |
+| OpenAI | gpt-4o | 稳定可靠 |
+
+## 📸 界面预览
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ☰  DeskJarvis                                            ⚙️   │
+├─────┬───────────────────────────────────────────┬───────────────┤
+│     │                                           │  任务进度      │
+│ 聊  │  你: 统计桌面文件，画个饼图                  │               │
+│ 天  │                                           │  ✅ 统计文件   │
+│ 记  │  AI: 好的，我来帮你统计并生成图表...         │  ✅ 生成图表   │
+│ 录  │      [图表已保存到桌面]                     │               │
+│     │                                           │  执行日志      │
+│     │                                           │  [SUCCESS]    │
+├─────┴───────────────────────────────────────────┴───────────────┤
+│  📎  输入你的指令...                                      发送   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 3. 运行测试
+## 🏗️ 技术架构
 
-```bash
-# 命令行模式
-python agent/main.py "从Python官网下载最新安装包"
-
-# 交互式模式
-python agent/main.py
+```
+DeskJarvis/
+├── src/                    # React 前端 (TypeScript)
+│   ├── components/         # UI 组件
+│   ├── utils/              # 工具函数
+│   └── types/              # 类型定义
+├── src-tauri/              # Tauri 后端 (Rust)
+│   └── src/main.rs         # Rust 入口
+├── agent/                  # Python AI Agent
+│   ├── planner/            # AI 规划器 (Claude/DeepSeek/OpenAI)
+│   ├── executor/           # 执行器 (浏览器/文件/系统)
+│   ├── memory/             # 记忆系统 (SQLite + ChromaDB)
+│   └── main.py             # Agent 入口
+└── docs/                   # 开发文档
 ```
 
-### 桌面应用版本（开发中）
+### 技术栈
+- **前端**: React + TypeScript + Tailwind CSS + Framer Motion
+- **桌面框架**: Tauri (Rust)
+- **AI Agent**: Python + LangGraph
+- **浏览器自动化**: Playwright
+- **记忆系统**: SQLite + ChromaDB (向量数据库)
 
-桌面应用（Tauri + React）正在开发中，敬请期待！
+## 📚 开发文档
 
-详细使用说明请查看 [agent/README.md](agent/README.md)
+| 文档 | 说明 |
+|------|------|
+| [架构设计](docs/ARCHITECTURE.md) | 整体架构和模块设计 |
+| [开发规范](docs/DEVELOPMENT.md) | 代码规范和开发流程 |
+| [AI 工作流](docs/AI_WORKFLOW.md) | AI 辅助开发指南 |
+| [技术决策](docs/DECISIONS.md) | 重要技术决策记录 |
+| [多代理系统](docs/MULTI_AGENT.md) | 多 Agent 协作设计 |
 
-## 截图演示
-（等你做好demo后，这里上传GIF截图）
+## 🤝 贡献指南
 
-## 开发进度
+欢迎贡献代码、提交 Issue 或改进文档！
 
-### ✅ 已完成（MVP阶段）
-- [x] 项目架构设计和文档体系
-- [x] Python Agent核心模块
-  - [x] 配置管理模块
-  - [x] 日志系统（JSON格式）
-  - [x] Claude规划器（Planner）
-  - [x] 浏览器执行器（Browser Executor）
-  - [x] 文件管理器（File Manager）
-  - [x] 命令行入口
-- [x] 代码模板和开发规范
+1. Fork 本项目
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 提交 Pull Request
 
-### 🚧 进行中
-- [ ] 桌面应用UI（Tauri + React）
-- [ ] 集成测试和E2E测试
+## 📜 开源协议
 
-### 📋 计划中
-- [ ] 远程控制（Telegram Bot）
-- [ ] 更多文件操作功能
-- [ ] 场景模板库
+本项目采用 [GPLv3](LICENSE) 协议开源。
 
-欢迎贡献！提issue或PR~
+## 🙏 致谢
 
-## 开发文档
+- [Tauri](https://tauri.app/) - 轻量级桌面应用框架
+- [Anthropic Claude](https://www.anthropic.com/) - 强大的 AI 模型
+- [Playwright](https://playwright.dev/) - 浏览器自动化
+- [ChromaDB](https://www.trychroma.com/) - 向量数据库
 
-**对于开发者**：
-- 📐 [架构设计文档](docs/ARCHITECTURE.md) - 了解整体架构和技术栈
-- 📝 [开发规范文档](docs/DEVELOPMENT.md) - 代码规范和开发流程
-- 🤖 [AI辅助开发指南](docs/AI_WORKFLOW.md) - 如何使用AI辅助开发
-- 📋 [技术决策记录](docs/DECISIONS.md) - 重要技术决策和原因
+---
 
-**快速开始开发**：
-1. 阅读 [架构设计文档](docs/ARCHITECTURE.md)
-2. 阅读 [AI辅助开发指南](docs/AI_WORKFLOW.md)
-3. 使用标准提示词模板开始开发
-
-## 作者
-今晚打老虎🐯
-
-
-License: GPLv3
+<p align="center">
+  Made with ❤️ by 今晚打老虎🐯
+</p>

@@ -39,7 +39,7 @@ class Config:
         "claude": "claude-3-5-sonnet-20241022",
         "openai": "gpt-4-turbo-preview",
         "chatgpt": "gpt-4-turbo-preview",
-        "deepseek": "deepseek-chat",
+        "deepseek": "deepseek-chat",  # DeepSeek-V3，最强通用模型
         "grok": "grok-beta",
     }
     

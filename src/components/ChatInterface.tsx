@@ -16,15 +16,26 @@ import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 // @ts-ignore
 import remarkGfm from "remark-gfm";
-import { ChatMessage, TaskStatus, AppConfig, LogEntry } from "../types";
+import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult } from "../types";
 import { executeTask, isTauriEnvironment } from "../utils/tauri";
 import { ChatSidebar, ChatSession } from "./ChatSidebar";
+import { UserInputDialog, InputRequest } from "./UserInputDialog";
+import { 
+  toastVariants, 
+  messageVariants, 
+  imagePreviewVariants,
+  transitionFast
+} from "../utils/animations";
 
 // 导入Tauri事件API
 let listenProgress: any = null;
+let tauriInvoke: any = null;
 if (isTauriEnvironment()) {
   import("@tauri-apps/api/event").then((module) => {
     listenProgress = module.listen;
+  });
+  import("@tauri-apps/api/core").then((module) => {
+    tauriInvoke = module.invoke;
   });
 }
 
@@ -38,6 +49,12 @@ interface ChatInterfaceProps {
   onLogsChange?: (logs: LogEntry[]) => void;
   /** 任务状态变化回调 */
   onStatusChange?: (status: TaskStatus) => void;
+  /** 进度面板切换回调 */
+  onProgressPanelToggle?: () => void;
+  /** 执行模式变化回调 */
+  onExecutionModeChange?: (mode: "single-agent" | "multi-agent") => void;
+  /** 活动 Agent 变化回调 */
+  onActiveAgentChange?: (agent: string | undefined) => void;
 }
 
 /**
@@ -50,6 +67,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onLogsChange,
   onStatusChange,
   onProgressPanelToggle,
+  onExecutionModeChange,
+  onActiveAgentChange,
 }) => {
   // 聊天会话管理
   const [chats, setChats] = useState<ChatSession[]>([]);
@@ -70,34 +89,52 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [lastTaskContext, setLastTaskContext] = useState<any>(null); // 保存上次任务上下文
   const [isDragging, setIsDragging] = useState(false);
   const [attachedPath, setAttachedPath] = useState<string | null>(null);
+  
+  // 用户输入请求（登录、验证码等）
+  const [userInputRequest, setUserInputRequest] = useState<InputRequest | null>(null);
+  
+  // 多代理协作状态
+  const [executionMode, setExecutionMode] = useState<"single-agent" | "multi-agent">("single-agent");
+  const [activeAgent, setActiveAgent] = useState<string | undefined>(undefined);
   const [copyToast, setCopyToast] = useState<{ show: boolean; message: string }>({ show: false, message: "" });
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // 追踪已复制的消息ID
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const currentAssistantMessageIdRef = useRef<string | null>(null); // 跟踪当前正在更新的AI消息ID
   const prevMessagesLengthRef = useRef<number>(0); // 用于优化滚动性能
-  const typingStateRef = useRef<{
-    messageIndex: number;
-    charIndex: number;
-    isTyping: boolean;
-    currentMessage: string;
-    _clearingScheduled?: boolean; // 标记是否已安排清除延迟
-  } | null>(null); // 打字机效果状态
-  const planningUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null); // 打字机效果定时器
   const isTaskCancelledRef = useRef<boolean>(false); // 任务是否被取消
   const unlistenProgressRef = useRef<(() => void) | null>(null); // 进度事件监听器的清理函数
 
   // 组件加载时输出日志，确认控制台正常工作
   useEffect(() => {
-    console.log("🚀 [ChatInterface] 组件已加载");
-    console.log("🚀 [ChatInterface] Tauri环境:", isTauriEnvironment());
-    console.log("🚀 [ChatInterface] 当前消息数量:", messages.length);
+    console.log("[ChatInterface] 组件已加载");
+    console.log("[ChatInterface] Tauri环境:", isTauriEnvironment());
     
-    // 添加提示：如何打开开发者工具
-    console.log("💡 [提示] 要打开开发者工具，请在应用窗口内按：");
-    console.log("   macOS: Cmd + Option + I");
-    console.log("   Windows/Linux: F12");
-    console.log("   或者右键点击页面 → 选择'检查'");
+    // 监听 Tauri 原生拖拽事件（获取完整文件路径）
+    let unlistenDrop: (() => void) | null = null;
+    
+    if (isTauriEnvironment()) {
+      import("@tauri-apps/api/event").then(({ listen }) => {
+        listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
+          console.log("[拖拽] 收到文件:", event.payload.paths);
+          if (event.payload.paths && event.payload.paths.length > 0) {
+            const path = event.payload.paths[0];
+            setAttachedPath(path);
+            setInput((prev) => {
+              const trimmed = prev.trim();
+              return trimmed ? `${trimmed}` : "";
+            });
+          }
+        }).then((unlisten) => {
+          unlistenDrop = unlisten;
+        });
+      });
+    }
+    
+    return () => {
+      if (unlistenDrop) unlistenDrop();
+    };
   }, []);
 
   // 从 localStorage 加载聊天历史
@@ -334,12 +371,40 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       level,
       message,
     };
-    setLogs((prev) => {
-      const updated = [...prev, newLog];
-      onLogsChange?.(updated);
-      return updated;
-    });
+    setLogs((prev) => [...prev, newLog]);
   };
+
+  // 添加带 Agent 标识的日志
+  const addLogWithAgent = (level: LogEntry["level"], message: string, agent: string) => {
+    const newLog: LogEntry = {
+      timestamp: new Date(),
+      level,
+      message,
+      agent,
+    };
+    setLogs((prev) => [...prev, newLog]);
+  };
+  
+  // 使用 useEffect 同步状态到父组件，避免在渲染期间更新父组件状态
+  useEffect(() => {
+    onLogsChange?.(logs);
+  }, [logs]);
+  
+  useEffect(() => {
+    onStepsChange?.(currentSteps);
+  }, [currentSteps]);
+  
+  useEffect(() => {
+    onCurrentStepChange?.(currentStepIndex);
+  }, [currentStepIndex]);
+  
+  useEffect(() => {
+    onExecutionModeChange?.(executionMode);
+  }, [executionMode]);
+  
+  useEffect(() => {
+    onActiveAgentChange?.(activeAgent);
+  }, [activeAgent]);
 
   // 自动滚动到底部（优化：只在消息数量变化时滚动，避免打字机效果时频繁滚动）
   useEffect(() => {
@@ -483,10 +548,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       unlistenProgressRef.current = null;
     }
     
-    // 停止打字机效果
-    if (typingStateRef.current) {
-      typingStateRef.current = null;
-    }
+    // 重置累积内容
+    accumulatedContentRef.current = "";
     
     // 更新状态
     updateStatus("idle");
@@ -561,6 +624,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setCurrentSteps([]);
     setCurrentStepIndex(-1);
     setLogs([]);
+    // 通知父组件清空右侧进度面板
+    onStepsChange?.([]);
+    onCurrentStepChange?.(-1);
+    onLogsChange?.([]);
     addLog("info", "开始规划任务...");
 
     // ✅ 先设置进度事件监听器（在消息创建之前，避免竞态条件）
@@ -582,170 +649,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
     }
 
-    // ✅ 立即创建并显示 AI 回复消息（初始内容就是"正在规划任务..."，避免后续更新时出现两个气泡）
-    // 先检查是否已经有"正在规划任务"的消息，如果有就删除（避免重复）
-    setMessages((prev) => {
-      // 删除所有"正在规划任务"的消息（避免重复）
-      const filtered = prev.filter(
-        (msg) => !(msg.role === "assistant" && msg.content.includes("正在规划任务"))
-      );
-      return filtered;
-    });
-    
+    // ✅ 创建 AI 回复消息（初始内容为"正在思考..."）
     const tempAssistantId = `temp-assistant-${Date.now()}`;
     currentAssistantMessageIdRef.current = tempAssistantId;
     const initialAssistantMessage: ChatMessage = {
       id: tempAssistantId,
       role: "assistant",
-      content: "",  // 初始为空，打字机效果会逐步显示
+      content: "好的，让我来处理...",  // 初始内容
       timestamp: new Date(),
     };
     console.log("✅ [handleSend] 创建AI消息，ID:", tempAssistantId);
-    setMessages((prev) => {
-      // 再次检查，确保没有重复的规划消息
-      const hasPlanningMessage = prev.some(
-        (msg) => msg.role === "assistant" && (msg.content.includes("正在规划任务") || msg.content.includes("正在分析任务") || msg.content.includes("正在生成步骤"))
-      );
-      if (hasPlanningMessage) {
-        console.warn("⚠️ [handleSend] 发现重复的规划消息，跳过创建");
-        return prev;
-      }
-      console.log("✅ [handleSend] 添加AI消息到列表");
-      return [...prev, initialAssistantMessage];
-    });
-    
-    // 打字机效果：逐字显示，然后清除，再显示下一个
-    // 使用 ref 来保存定时器，确保可以在其他地方访问
-    planningUpdateIntervalRef.current = null;
-    const planningMessages = [
-      "正在分析任务...",
-      "正在规划任务...",
-      "正在生成步骤...",
-    ];
-    
-    // 使用 ref 保存状态，避免闭包问题
-    typingStateRef.current = {
-      messageIndex: 0,
-      charIndex: 0,
-      isTyping: true,
-      currentMessage: planningMessages[0],
-      _clearingScheduled: false,
-    };
-    
-    // 使用 requestAnimationFrame 来节流滚动，避免频繁滚动导致抖动
-    let scrollAnimationFrame: number | null = null;
-    const scheduleScroll = () => {
-      if (scrollAnimationFrame) return; // 如果已经有待执行的滚动，跳过
-      scrollAnimationFrame = requestAnimationFrame(() => {
-        if (messagesEndRef.current) {
-          messagesEndRef.current.scrollIntoView({ behavior: "instant" });
-        }
-        scrollAnimationFrame = null;
-      });
-    };
-    
-    planningUpdateIntervalRef.current = setInterval(() => {
-      // 使用 ref 获取最新状态，避免闭包问题
-      // 注意：只在状态不是 planning 且不是 executing 时才停止（executing 时可能还在更新消息）
-      if (!currentAssistantMessageIdRef.current || !typingStateRef.current) {
-        if (planningUpdateIntervalRef.current) {
-          clearInterval(planningUpdateIntervalRef.current);
-          planningUpdateIntervalRef.current = null;
-        }
-        typingStateRef.current = null;
-        return;
-      }
-      
-      // 如果状态不再是 planning 和 executing，停止打字机效果
-      // 注意：executing 状态时可能还在更新消息，所以也要继续
-      if (statusRef.current !== "planning" && statusRef.current !== "executing") {
-        if (planningUpdateIntervalRef.current) {
-          clearInterval(planningUpdateIntervalRef.current);
-          planningUpdateIntervalRef.current = null;
-        }
-        // 如果消息内容为空，设置一个默认内容，避免显示空白
-        setMessages((prev) => {
-          return prev.map((msg) => {
-            if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant" && (!msg.content || !msg.content.trim())) {
-              return { ...msg, content: "正在处理..." };
-            }
-            return msg;
-          });
-        });
-        typingStateRef.current = null;
-        return; // 停止打字机效果，让事件处理更新消息
-      }
-      
-      const state = typingStateRef.current;
-      
-      setMessages((prev) => {
-        return prev.map((msg) => {
-          if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
-            
-            // 如果消息内容已经不是规划相关的，停止打字机效果
-            const content = msg.content.trim();
-            
-            // 只有在明确包含"规划完成"时才停止打字机效果
-            // 其他情况（包括空内容、部分内容如"正在"）都继续打字机效果
-            if (content.includes("规划完成") && !content.includes("正在分析任务") && !content.includes("正在规划任务") && !content.includes("正在生成步骤")) {
-              if (planningUpdateIntervalRef.current) {
-                clearInterval(planningUpdateIntervalRef.current);
-                planningUpdateIntervalRef.current = null;
-              }
-              typingStateRef.current = null;
-              return msg;
-            }
-            
-            if (state.isTyping) {
-              // 打字阶段：逐字添加
-              if (state.charIndex < state.currentMessage.length) {
-                const newContent = state.currentMessage.substring(0, state.charIndex + 1);
-                state.charIndex++;
-                // 只在每3个字符更新一次时触发滚动，减少滚动频率
-                if (state.charIndex % 3 === 0) {
-                  scheduleScroll();
-                }
-                return { ...msg, content: newContent };
-              } else {
-                // 打字完成，延迟0.5秒后开始清除（进一步减少延迟时间，提升流畅度）
-                // 使用一个标记来避免重复设置延迟
-                if (!state._clearingScheduled) {
-                  state._clearingScheduled = true;
-                  setTimeout(() => {
-                    if (typingStateRef.current) {
-                      typingStateRef.current.isTyping = false;
-                      typingStateRef.current._clearingScheduled = false;
-                    }
-                  }, 500); // 从800ms减少到500ms，提升流畅度
-                }
-                return msg;
-              }
-            } else {
-              // 清除阶段：逐字删除
-              if (state.charIndex > 0) {
-                const newContent = state.currentMessage.substring(0, state.charIndex - 1);
-                state.charIndex--;
-                // 清除阶段不触发滚动，避免抖动
-                return { ...msg, content: newContent };
-              } else {
-                // 清除完成，切换到下一个消息
-                state.messageIndex = (state.messageIndex + 1) % planningMessages.length;
-                state.currentMessage = planningMessages[state.messageIndex];
-                state.isTyping = true;
-                state.charIndex = 0;
-                state._clearingScheduled = false;
-                // 不要将内容设为空，而是立即显示第一个字符，避免出现空白
-                const firstChar = state.currentMessage.substring(0, 1);
-                return { ...msg, content: firstChar };
-              }
-            }
-          }
-          return msg;
-        });
-      });
-    }, 50); // 从30ms增加到50ms，减少更新频率，降低抖动
-
-    console.log("✅ [handleSend] 打字机效果已启动");
+    setMessages((prev) => [...prev, initialAssistantMessage]);
 
     try {
       console.log("🚀 [handleSend] 进入 try 块，准备执行任务");
@@ -816,7 +730,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           }
           return prev;
         });
-        onStepsChange?.(result.steps);
+        // onStepsChange 由 useEffect 自动同步
       }
 
       // 检查是否有截图结果，提取图片路径
@@ -939,28 +853,113 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         console.warn(`⚠️ [图片预览] 没有成功加载任何图片`);
       }
 
-      // 构建消息内容
-      let messageContent = result.success
-        ? (result.message || "任务执行完成")
-        : `执行失败: ${result.message || "未知错误"}`;
+      // 构建简洁的总结消息
+      const successCount = result.steps?.filter((s: any) => s.result?.success).length || 0;
+      const totalCount = result.steps?.length || 0;
       
-      console.log("📝 [handleSend] 原始消息内容:", messageContent);
-      console.log("📝 [handleSend] result对象:", { success: result.success, message: result.message, hasSteps: !!result.steps });
+      let messageContent = "";
+      if (result.success) {
+        messageContent = result.message || "任务执行完成";
+      } else {
+        messageContent = `执行失败: ${result.message || "未知错误"}`;
+      }
       
-      // 如果有截图，显示保存路径
+      // 提取特定工具的详细结果
+      if (result.steps && result.steps.length > 0) {
+        for (const stepItem of result.steps) {
+          const stepType = stepItem.step?.type;
+          const stepResult = stepItem.result;
+          
+          if (!stepResult?.success) continue;
+          
+          // 文本处理结果
+          if (stepType === "text_process" && stepResult.data?.result) {
+            messageContent += "\n\n**结果：**\n" + stepResult.data.result;
+          }
+          // 系统信息
+          else if (stepType === "get_system_info" && stepResult.data) {
+            const info = stepResult.data;
+            let infoText = "\n\n**系统信息：**";
+            if (info.battery) {
+              infoText += `\n- 电池: ${info.battery.percentage}% ${info.battery.charging ? "(充电中)" : ""}`;
+            }
+            if (info.disk) {
+              infoText += `\n- 磁盘: 已用 ${info.disk.used} / 总共 ${info.disk.total} (${info.disk.use_percent})`;
+            }
+            if (info.running_apps) {
+              infoText += `\n- 运行中应用: ${info.running_apps.slice(0, 10).join(", ")}${info.running_apps.length > 10 ? "..." : ""}`;
+            }
+            if (info.network?.local_ip) {
+              infoText += `\n- 本机IP: ${info.network.local_ip}`;
+            }
+            messageContent += infoText;
+          }
+          // 图片处理结果
+          else if (stepType === "image_process" && stepResult.data) {
+            const imgData = stepResult.data;
+            if (imgData.path) {
+              messageContent += `\n\n已保存: ${imgData.path}`;
+            }
+            if (imgData.width && imgData.height) {
+              messageContent += `\n尺寸: ${imgData.width}x${imgData.height}`;
+            }
+          }
+          // 提醒列表
+          else if (stepType === "list_reminders" && stepResult.data?.reminders) {
+            const reminders = stepResult.data.reminders;
+            if (reminders.length > 0) {
+              messageContent += "\n\n**待处理提醒：**";
+              for (const r of reminders.slice(0, 5)) {
+                messageContent += `\n- ${r.message} (${r.remaining})`;
+              }
+            }
+          }
+          // 工作流列表
+          else if (stepType === "list_workflows" && stepResult.data?.workflows) {
+            const workflows = stepResult.data.workflows;
+            if (workflows.length > 0) {
+              messageContent += "\n\n**可用工作流：**";
+              for (const w of workflows) {
+                messageContent += `\n- **${w.name}**: ${w.description || w.commands_count + " 个命令"}`;
+              }
+            }
+          }
+          // 任务历史
+          else if (stepType === "get_task_history" && stepResult.data?.tasks) {
+            const tasks = stepResult.data.tasks;
+            if (tasks.length > 0) {
+              messageContent += "\n\n**最近任务：**";
+              for (const t of tasks.slice(0, 5)) {
+                const status = t.success ? "✓" : "✗";
+                messageContent += `\n- ${status} ${t.instruction.slice(0, 30)}${t.instruction.length > 30 ? "..." : ""} (${t.time_display || ""})`;
+              }
+            }
+          }
+          // 收藏列表
+          else if (stepType === "list_favorites" && stepResult.data?.favorites) {
+            const favorites = stepResult.data.favorites;
+            if (favorites.length > 0) {
+              messageContent += "\n\n**我的收藏：**";
+              for (const f of favorites) {
+                messageContent += `\n- ${f.name}`;
+              }
+            } else {
+              messageContent += "\n\n暂无收藏";
+            }
+          }
+        }
+      }
+      
+      // 如果有截图，简洁显示保存路径
       if (screenshotPaths.length > 0) {
-        const paths = screenshotPaths.map(p => `\n📁 ${p}`).join('');
+        const paths = screenshotPaths.map(p => `\n已保存: ${p}`).join('');
         messageContent += paths;
       }
 
-      // ✅ 停止打字机效果（如果还在运行）
-      if (planningUpdateIntervalRef.current) {
-        clearInterval(planningUpdateIntervalRef.current);
-        planningUpdateIntervalRef.current = null;
-      }
-      if (typingStateRef.current) {
-        typingStateRef.current = null;
-      }
+      console.log("[handleSend] 最终消息:", messageContent);
+
+      // ✅ 重置累积内容
+      accumulatedContentRef.current = "";
 
       // ✅ 更新临时AI消息为最终消息（替换临时消息）
       const finalAssistantId = `assistant-${Date.now()}`;
@@ -1018,9 +1017,9 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       // 保存任务上下文（用于下次任务理解"这个文件"等引用）
       if (result.steps && result.steps.length > 0) {
         const contextFiles: string[] = [];
-        let latestFile: string | null = null; // 最新的文件路径（优先使用重命名/移动后的新路径）
+        let latestFile: string | null = null; // 最新的文件路径
         
-        // 按步骤顺序处理，确保最新的操作排在前面
+        // 按步骤顺序处理，总是更新 latestFile 为最后一个成功的文件操作
         for (const stepItem of result.steps) {
           const stepType = stepItem.step?.type;
           const stepResult = stepItem.result;
@@ -1031,37 +1030,60 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           // 收集创建的文件路径
           if (stepType === "file_create" && stepData?.path) {
             contextFiles.push(stepData.path);
-            if (!latestFile) latestFile = stepData.path; // 如果没有最新文件，使用这个
+            latestFile = stepData.path; // 总是更新为最新的文件
           }
           // 收集截图创建的文件路径
           if (stepType === "screenshot_desktop" && stepData?.path) {
             contextFiles.push(stepData.path);
-            if (!latestFile) latestFile = stepData.path; // 如果没有最新文件，使用这个
+            latestFile = stepData.path; // 总是更新为最新的截图
+            console.log(`✅ [上下文] 截图保存: ${stepData.path}，更新最新文件`);
           }
           // 收集重命名/移动操作的文件路径（优先使用新路径）
           if (stepType === "file_rename" || stepType === "file_move") {
-            // 对于重命名/移动操作，优先使用新路径作为最新文件
-            // file_rename 返回: {source: "...", target: "..."}
-            // file_move 返回: {path: "...", new_path: "..."}
-            const newPath = stepData?.target || stepData?.new_path; // file_rename 用 target，file_move 用 new_path
-            const oldPath = stepData?.source || stepData?.path; // file_rename 用 source，file_move 用 path
+            const newPath = stepData?.target || stepData?.new_path;
+            const oldPath = stepData?.source || stepData?.path;
             
             if (newPath) {
               contextFiles.push(newPath);
-              latestFile = newPath; // 重命名/移动后的新路径是最新的
-              console.log(`✅ [上下文] 重命名/移动操作: ${oldPath} → ${newPath}，更新最新文件为: ${newPath}`);
+              latestFile = newPath; // 重命名/移动后的新路径
+              console.log(`✅ [上下文] 重命名/移动: ${oldPath} → ${newPath}`);
             } else if (oldPath) {
               contextFiles.push(oldPath);
-              if (!latestFile) latestFile = oldPath;
+              latestFile = oldPath;
+            }
+          }
+          // 收集下载的文件路径
+          if (stepType === "download_file" && stepData?.path) {
+            contextFiles.push(stepData.path);
+            latestFile = stepData.path;
+          }
+          // 收集 Python 脚本操作的文件（如果返回了文件路径）
+          if (stepType === "execute_python_script") {
+            // 脚本可能返回 deleted_files、created_files、path 等
+            if (stepData?.path) {
+              contextFiles.push(stepData.path);
+              latestFile = stepData.path;
+            }
+            if (stepData?.created_files && Array.isArray(stepData.created_files)) {
+              for (const f of stepData.created_files) {
+                contextFiles.push(f);
+                latestFile = f;
+              }
+            }
+            // 如果是删除操作，记录被删除的文件（但不设为 latestFile）
+            if (stepData?.deleted_files && Array.isArray(stepData.deleted_files)) {
+              for (const f of stepData.deleted_files) {
+                contextFiles.push(f);
+              }
             }
           }
         }
         
-        if (contextFiles.length > 0) {
-          const finalLatestFile = latestFile || contextFiles[0];
+        if (contextFiles.length > 0 || latestFile) {
+          const finalLatestFile = latestFile || contextFiles[contextFiles.length - 1];
           setLastTaskContext({
             created_files: contextFiles,
-            last_created_file: finalLatestFile, // 优先使用最新操作的文件路径
+            last_created_file: finalLatestFile,
             timestamp: Date.now(),
           });
           console.log(`✅ [上下文] 更新上下文: 最新文件 = ${finalLatestFile}, 所有文件 = [${contextFiles.join(", ")}]`);
@@ -1114,16 +1136,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
       updateStatus("error");
     } finally {
-      // 清理事件监听器和定时器
+      // 清理事件监听器
       if (unlistenProgress) {
         unlistenProgress();
         unlistenProgressRef.current = null;
       }
-      if (planningUpdateIntervalRef.current) {
-        clearInterval(planningUpdateIntervalRef.current);
-        planningUpdateIntervalRef.current = null;
-      }
-      typingStateRef.current = null; // 清除打字机状态
+      
+      // 重置累积内容
+      accumulatedContentRef.current = "";
       
       // 检查任务是否被取消（在重置标记之前）
       const wasCancelled = isTaskCancelledRef.current;
@@ -1143,224 +1163,201 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     }
   };
 
-  // 处理进度事件
-  const handleProgressEvent = (event: any) => {
-    const eventType = event.type;
-    const eventData = event.data || {};
+  // 累积的消息内容 ref（避免打字机效果竞态）
+  const accumulatedContentRef = useRef<string>("");
 
-    console.log("📊 [进度事件]", eventType, eventData);
-
-    // ✅ 实时更新AI回复内容（只更新，不创建新消息）
-    if (currentAssistantMessageIdRef.current) {
-      setMessages((prev) => {
-        // 确保只更新现有消息，不创建新消息
-        const messageExists = prev.some(
-          (msg) => msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant"
-        );
-        
-        if (!messageExists) {
-          // 如果消息不存在，直接返回，不创建新消息
-          console.warn("⚠️ [进度事件] 找不到要更新的消息，跳过更新");
-          return prev;
-        }
-        
-        // 检查是否已经有多个"正在规划任务"的消息（避免重复显示）
-        const planningMessages = prev.filter(
-          (msg) => msg.role === "assistant" && msg.content.includes("正在规划任务")
-        );
-        
-        // 如果已经有多个"正在规划任务"的消息，删除多余的（只保留当前正在更新的消息）
-        if (planningMessages.length > 1) {
-          console.warn(`⚠️ [进度事件] 发现 ${planningMessages.length} 个规划消息，删除多余的`);
-          const messagesToKeep = prev.filter((msg) => {
-            // 保留当前正在更新的消息
-            if (msg.id === currentAssistantMessageIdRef.current) {
-              return true;
-            }
-            // 删除其他"正在规划任务"的消息
-            if (msg.role === "assistant" && msg.content.includes("正在规划任务")) {
-              return false;
-            }
-            // 保留其他消息
-            return true;
-          });
-          
-          return messagesToKeep.map((msg) => {
+  // 简化的消息更新函数（不使用打字机效果，直接更新）
+  const updateAssistantMessage = (content: string, append: boolean = false) => {
+    if (!currentAssistantMessageIdRef.current) return;
+    
+    if (append) {
+      // 追加模式：在现有内容后追加
+      accumulatedContentRef.current = accumulatedContentRef.current 
+        ? `${accumulatedContentRef.current}\n${content}` 
+        : content;
+    } else {
+      // 替换模式：直接替换
+      accumulatedContentRef.current = content;
+    }
+    
+    const newContent = accumulatedContentRef.current;
+    
+    setMessages((prev) => {
+      return prev.map((msg) => {
             if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
-              let newContent = msg.content;
-              
-              switch (eventType) {
-                case "planning_started":
-                  // 规划阶段：不覆盖消息内容，让打字机效果继续工作
-                  return msg; // 返回原消息，让打字机效果继续
-                  break;
-                default:
-                  // 其他事件类型保持原有逻辑
-                  break;
-              }
-              
               return { ...msg, content: newContent };
             }
             return msg;
           });
-        }
-        
-        return prev.map((msg) => {
-          if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
-            let newContent = msg.content;
-            
-            switch (eventType) {
-              case "planning_started":
-                // 规划阶段：不覆盖消息内容，让打字机效果继续工作
-                // 如果打字机效果还没开始，初始化它
-                if (!typingStateRef.current) {
-                  typingStateRef.current = {
-                    messageIndex: 0,
-                    charIndex: 0,
-                    isTyping: true,
-                    currentMessage: planningMessages[0],
-                  };
-                }
-                return msg; // 返回原消息，让打字机效果继续
-                break;
-              case "planning_completed":
-                // 停止打字机效果
-                if (typingStateRef.current) {
-                  typingStateRef.current = null;
-                }
-                // 清除打字机效果的定时器
-                if (planningUpdateIntervalRef.current) {
-                  clearInterval(planningUpdateIntervalRef.current);
-                  planningUpdateIntervalRef.current = null;
-                }
-                const stepCount = eventData.step_count || 0;
-                newContent = `规划完成，共 ${stepCount} 个步骤\n\n`;
-                console.log("✅ [进度事件] planning_completed，更新消息内容:", newContent);
-                break;
-              case "browser_starting":
-                newContent = `规划完成\n\n正在启动浏览器...`;
-                break;
-              case "browser_started":
-                newContent = `规划完成\n\n浏览器已启动`;
-                break;
-              case "step_started":
-                const stepIndex = eventData.step_index || 0;
-                const totalSteps = eventData.total_steps || 0;
-                const stepAction = eventData.step?.action || eventData.step?.description || "";
-                newContent = `规划完成\n\n正在执行步骤 ${stepIndex + 1}/${totalSteps}: ${stepAction}`;
-                break;
-              case "step_completed":
-                const completedIndex = eventData.step_index || 0;
-                const completedTotal = eventData.total_steps || 0;
-                const completedAction = eventData.step?.action || eventData.step?.description || "";
-                const stepResult = eventData.result || {};
-                newContent = `规划完成\n\n步骤 ${completedIndex + 1}/${completedTotal}: ${completedAction} ${stepResult.success ? "完成" : "失败"}`;
-                break;
-              case "step_failed":
-                const failedIndex = eventData.step_index || 0;
-                const failedTotal = eventData.total_steps || 0;
-                const failedAction = eventData.step?.action || eventData.step?.description || "";
-                newContent = `规划完成\n\n步骤 ${failedIndex + 1}/${failedTotal}: ${failedAction} 失败`;
-                break;
-              case "task_completed":
-                const successCount = eventData.success_count || 0;
-                const totalCount = eventData.total_count || 0;
-                newContent = `任务完成：${successCount}/${totalCount} 个步骤成功`;
-                break;
-              case "task_failed":
-                newContent = `任务失败: ${eventData.error || "未知错误"}`;
-                break;
-            }
-            
-            return { ...msg, content: newContent };
-          }
-          return msg;
-        });
-      });
-    }
+    });
+  };
+
+  // 处理进度事件 - 简洁显示，步骤详情只在右侧面板
+  const handleProgressEvent = (event: any) => {
+    const eventType = event.type;
+    const eventData = event.data || {};
+
+    console.log("[进度事件]", eventType, eventData);
 
     switch (eventType) {
-      case "task_started":
+      // ========== 思考阶段 ==========
+      case "thinking":
+        // 显示AI说的话
+        const thinkingContent = eventData.content || "让我想想...";
+        accumulatedContentRef.current = thinkingContent;
+        updateAssistantMessage(thinkingContent, false);
         updateStatus("planning");
-        addLog("info", `开始执行任务: ${eventData.instruction || ""}`);
         break;
 
-      case "planning_started":
-        updateStatus("planning");
-        addLog("info", "AI正在规划任务...");
-        break;
-
-      case "planning_completed":
-        updateStatus("executing");
-        const stepCount = eventData.step_count || 0;
-        addLog("success", `规划完成，共 ${stepCount} 个步骤`);
-        if (eventData.steps && eventData.steps.length > 0) {
-          // 初始化步骤列表（带空结果）
-          const initialSteps = eventData.steps.map((step: any) => ({
+      // ========== 计划就绪 ==========
+      case "plan_ready":
+        const steps = eventData.steps || [];
+        console.log("[plan_ready] 收到步骤:", steps.length, "个");
+        
+        // 显示AI的计划内容
+        const planContent = eventData.content || `我来处理，共 ${steps.length} 个步骤...`;
+        accumulatedContentRef.current = planContent;
+        updateAssistantMessage(planContent, false);
+        
+        // 初始化步骤列表（右侧面板显示）
+        if (steps.length > 0) {
+          const initialSteps = steps.map((step: any) => ({
             step,
             result: undefined,
           }));
+          console.log("[plan_ready] 设置步骤到右侧面板:", initialSteps);
           setCurrentSteps(initialSteps);
-          onStepsChange?.(initialSteps);
+          // onStepsChange 由 useEffect 自动同步
+        }
+
+        addLog("success", `规划完成，共 ${steps.length} 个步骤`);
+        break;
+
+      // ========== 执行开始 ==========
+      case "execution_started":
+        updateStatus("executing");
+        addLog("info", `开始执行，共 ${eventData.step_count || 0} 个步骤`);
+        break;
+
+      // ========== 步骤开始 ==========
+      case "step_started":
+        const startedIndex = eventData.step_index || 0;
+        const startedTotal = eventData.total_steps || 0;
+        const startedAction = eventData.action || eventData.step?.action || "";
+        
+        setCurrentStepIndex(startedIndex);
+        // onCurrentStepChange 由 useEffect 自动同步
+        
+        // 更新消息显示当前进度（简洁版）
+        updateAssistantMessage(`正在执行 (${startedIndex + 1}/${startedTotal})...`, false);
+        addLog("info", `执行步骤 ${startedIndex + 1}/${startedTotal}: ${startedAction}`);
+        break;
+
+      // ========== 步骤完成 ==========
+      case "step_completed":
+        const completedIndex = eventData.step_index || 0;
+        const completedStep = eventData.step || {};
+        const stepResult = eventData.result || {};
+        const totalSteps = eventData.total_steps || 0;
+        
+        // 更新步骤结果（右侧面板显示）
+        setCurrentSteps((prev) => {
+          const updated = [...prev];
+          if (updated[completedIndex]) {
+            updated[completedIndex] = {
+              step: completedStep,
+              result: stepResult,
+            };
+          }
+          // onStepsChange 由 useEffect 自动同步
+          return updated;
+        });
+        
+        // 如果有生成的图表，添加到消息中
+        if (stepResult.images && Array.isArray(stepResult.images) && stepResult.images.length > 0) {
+          // 为每个图表添加图片块到消息
+          stepResult.images.forEach((imagePath: string) => {
+            addLog("info", `生成图表: ${imagePath}`);
+          });
+          // 更新消息显示图表信息
+          updateAssistantMessage(`已生成 ${stepResult.images.length} 个图表`, false);
+        }
+        
+        // 如果自动安装了包，记录日志
+        if (stepResult.installed_packages && Array.isArray(stepResult.installed_packages) && stepResult.installed_packages.length > 0) {
+          addLog("info", `自动安装了依赖: ${stepResult.installed_packages.join(", ")}`);
+        }
+        
+        // 更新消息显示进度
+        updateAssistantMessage(`正在执行 (${completedIndex + 1}/${totalSteps})...`, false);
+        addLog("success", `步骤 ${completedIndex + 1} 成功`);
+        break;
+
+      // ========== 步骤失败 ==========
+      case "step_failed":
+        const failedIndex = eventData.step_index || 0;
+        const failedStep = eventData.step || {};
+        const failedResult = eventData.result || {};
+        const errorMsg = eventData.error || failedResult.message || "未知错误";
+        
+        // 更新步骤结果（右侧面板显示）
+        setCurrentSteps((prev) => {
+          const updated = [...prev];
+          if (updated[failedIndex]) {
+            updated[failedIndex] = {
+              step: failedStep,
+              result: { success: false, message: errorMsg },
+            };
+          }
+          // onStepsChange 由 useEffect 自动同步
+          return updated;
+        });
+        
+        addLog("error", `步骤 ${failedIndex + 1} 失败: ${errorMsg}`);
+        break;
+
+      // ========== 反思开始 ==========
+      case "reflection_started":
+        updateStatus("reflecting");
+        addLog("info", `正在反思失败原因...`);
+        updateAssistantMessage("正在分析问题并重新规划...", false);
+        break;
+
+      // ========== 反思完成 ==========
+      case "reflection_completed":
+        const newStepCount = eventData.new_step_count || 0;
+        addLog("info", `反思完成，新方案有 ${newStepCount} 个步骤`);
+        break;
+
+      // ========== 任务完成 ==========
+      case "task_completed":
+        // 不在这里更新消息，让 handleSend 处理最终结果
+        const success = eventData.success || false;
+        const successCount = eventData.success_count || 0;
+        const totalCount = eventData.total_count || 0;
+        const completedMessage = eventData.message || "";
+        
+        if (success) {
+          addLog("success", completedMessage || `任务完成: ${successCount}/${totalCount} 个步骤成功`);
+        } else {
+          addLog("warning", completedMessage || `任务部分完成: ${successCount}/${totalCount} 个步骤成功`);
         }
         break;
 
+      // ========== 错误 ==========
+      case "error":
+        const errorMessage = eventData.message || "未知错误";
+        addLog("error", errorMessage);
+        updateStatus("idle");
+        break;
+
+      // ========== 其他事件 ==========
       case "browser_starting":
         addLog("info", "正在启动浏览器...");
         break;
 
       case "browser_started":
         addLog("success", "浏览器已启动");
-        break;
-
-      case "step_started":
-        const stepIndex = eventData.step_index || 0;
-        const totalSteps = eventData.total_steps || 0;
-        const step = eventData.step || {};
-        setCurrentStepIndex(stepIndex);
-        onCurrentStepChange?.(stepIndex);
-        addLog("info", `执行步骤 ${stepIndex + 1}/${totalSteps}: ${step.action || step.description || ""}`);
-        break;
-
-      case "step_completed":
-        const completedStepIndex = eventData.step_index || 0;
-        const completedStep = eventData.step || {};
-        const stepResult = eventData.result || {};
-        
-        setCurrentSteps((prev) => {
-          const updated = [...prev];
-          if (updated[completedStepIndex]) {
-            updated[completedStepIndex] = {
-              step: completedStep,
-              result: stepResult,
-            };
-          }
-          return updated;
-        });
-        
-        if (stepResult.success) {
-          addLog("success", `步骤 ${completedStepIndex + 1} 成功: ${stepResult.message || ""}`);
-        } else {
-          addLog("error", `步骤 ${completedStepIndex + 1} 失败: ${stepResult.message || ""}`);
-        }
-        break;
-
-      case "step_failed":
-        const failedStepIndex = eventData.step_index || 0;
-        addLog("error", `步骤 ${failedStepIndex + 1} 失败: ${eventData.error || ""}`);
-        break;
-
-      case "task_completed":
-        updateStatus("idle");
-        const success = eventData.success || false;
-        const successCount = eventData.success_count || 0;
-        const totalCount = eventData.total_count || 0;
-        addLog("success", `任务完成: ${successCount}/${totalCount} 个步骤成功`);
-        break;
-
-      case "task_failed":
-        updateStatus("idle");
-        addLog("error", `任务失败: ${eventData.error || ""}`);
         break;
 
       case "browser_stopping":
@@ -1371,8 +1368,81 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         addLog("success", "浏览器已停止");
         break;
 
+      // ========== 请求用户输入（登录、验证码） ==========
+      case "request_input":
+        console.log("[request_input] 收到用户输入请求:", eventData);
+        setUserInputRequest(eventData as InputRequest);
+        addLog("info", `等待用户输入: ${eventData.title || "请输入"}`);
+        break;
+
+      // ========== 多代理协作事件 ==========
+      case "crew_started":
+        console.log("[crew_started] 多代理协作开始:", eventData);
+        updateStatus("multi_agent");
+        setExecutionMode("multi-agent");
+        const agents = eventData.agents || [];
+        addLog("info", `多代理团队启动: ${agents.join(", ")}`);
+        break;
+
+      case "agent_progress":
+        const agentName = eventData.agent || "Agent";
+        const agentMessage = eventData.message || "";
+        console.log(`[agent_progress] ${agentName}: ${agentMessage}`);
+        setActiveAgent(agentName);
+        addLogWithAgent("info", agentMessage, agentName);
+        // 更新 AI 消息
+        accumulatedContentRef.current = `[${agentName}] ${agentMessage}`;
+        updateAssistantMessage(accumulatedContentRef.current, false);
+        break;
+
+      case "crew_completed":
+        console.log("[crew_completed] 多代理协作完成:", eventData);
+        const crewSuccess = eventData.success;
+        const crewResult = eventData.result || "";
+        const crewDuration = eventData.duration || 0;
+        
+        if (crewSuccess) {
+          addLog("success", `团队协作完成 (${crewDuration.toFixed(1)}s)`);
+          updateAssistantMessage(crewResult, true);
+          updateStatus("completed");
+        } else {
+          addLog("error", `团队协作失败: ${eventData.error || "未知错误"}`);
+          updateStatus("error");
+        }
+        setActiveAgent(undefined);
+        break;
+
       default:
-        console.log("未知进度事件类型:", eventType);
+        console.log("[未处理事件]", eventType, eventData);
+    }
+  };
+
+  // 处理用户输入提交（登录、验证码）
+  const handleUserInputSubmit = async (requestId: string, values: Record<string, string>) => {
+    console.log("[用户输入] 提交:", requestId, values);
+    try {
+      if (tauriInvoke) {
+        await tauriInvoke("submit_user_input", { requestId, values });
+      }
+      setUserInputRequest(null);
+      addLog("success", "已提交用户输入");
+    } catch (error) {
+      console.error("[用户输入] 提交失败:", error);
+      addLog("error", `提交失败: ${error}`);
+    }
+  };
+
+  // 处理用户输入取消
+  const handleUserInputCancel = async (requestId: string) => {
+    console.log("[用户输入] 取消:", requestId);
+    try {
+      if (tauriInvoke) {
+        await tauriInvoke("cancel_user_input", { requestId });
+      }
+      setUserInputRequest(null);
+      addLog("info", "用户取消了输入");
+    } catch (error) {
+      console.error("[用户输入] 取消失败:", error);
     }
   };
 
@@ -1443,15 +1513,25 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   };
 
   // 复制消息内容
-  const handleCopyMessage = async (content: string) => {
-    try {
-      await navigator.clipboard.writeText(content);
+  const handleCopyMessage = async (content: string, messageId: string) => {
+    const onCopySuccess = () => {
+      // 设置已复制状态
+      setCopiedMessageId(messageId);
       // 显示成功提示
       setCopyToast({ show: true, message: "已复制到剪贴板" });
-      // 3秒后自动隐藏
+      // 2秒后恢复按钮状态
+      setTimeout(() => {
+        setCopiedMessageId(null);
+      }, 2000);
+      // 3秒后自动隐藏 Toast
       setTimeout(() => {
         setCopyToast({ show: false, message: "" });
       }, 3000);
+    };
+
+    try {
+      await navigator.clipboard.writeText(content);
+      onCopySuccess();
     } catch (error) {
       console.error("复制失败:", error);
       // 降级方案：使用传统方法
@@ -1463,12 +1543,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       textArea.select();
       try {
         document.execCommand("copy");
-        // 显示成功提示
-        setCopyToast({ show: true, message: "已复制到剪贴板" });
-        // 3秒后自动隐藏
-        setTimeout(() => {
-          setCopyToast({ show: false, message: "" });
-        }, 3000);
+        onCopySuccess();
       } catch (err) {
         console.error("复制失败（降级方案）:", err);
         // 显示失败提示
@@ -1496,7 +1571,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       }
 
       // 检查是否有可撤回的操作
-      const undoableSteps = taskResult.steps.filter((stepItem) => {
+      const undoableSteps = taskResult.steps.filter((stepItem: { step: any; result: any }) => {
       const stepType = stepItem.step?.type;
       const stepResult = stepItem.result;
       // 只撤回成功的操作
@@ -1749,14 +1824,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   return (
     <div className="h-full w-full flex flex-col bg-white dark:bg-[#0a0a0a] overflow-hidden relative">
       {/* 复制成功提示 Toast */}
-      <AnimatePresence>
+      <AnimatePresence mode="wait">
         {copyToast.show && (
           <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            transition={{ duration: 0.2 }}
-            className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 pointer-events-none"
+            variants={toastVariants}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 pointer-events-none gpu-accelerated"
           >
             <div className="bg-gray-900 dark:bg-gray-800 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1794,14 +1869,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       {/* 主聊天区域 */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* 消息列表 */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4 bg-white dark:bg-[#0a0a0a]" style={{
+        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4 bg-white dark:bg-[#0a0a0a] scrollbar-auto-hide" style={{
           // 优化滚动性能，减少抖动
           scrollBehavior: "smooth",
           willChange: status === "planning" ? "scroll-position" : "auto",
         }}>
         {messages.length === 0 && (
           <div className="text-center text-gray-500 dark:text-gray-400 mt-20">
-            <p className="text-xl font-medium mb-3 text-gray-700 dark:text-gray-300">👋 欢迎使用 DeskJarvis</p>
+            <p className="text-xl font-medium mb-3 text-gray-700 dark:text-gray-300">欢迎使用 DeskJarvis</p>
             <p className="text-sm text-gray-600 dark:text-gray-400">
               用自然语言告诉我你想做什么，我会帮你完成！
             </p>
@@ -1825,17 +1900,18 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           </div>
         )}
 
-        <AnimatePresence>
+        <AnimatePresence mode="popLayout">
           {messages.map((message, index) => (
             <motion.div
               key={message.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
+              variants={messageVariants}
+              initial="hidden"
+              animate="visible"
+              exit="exit"
+              layout
               className={`flex ${
                 message.role === "user" ? "justify-end" : "justify-start"
-              }`}
+              } gpu-accelerated`}
             >
               <div className={`flex items-start gap-2 max-w-[85%] ${
                 message.role === "user" ? "flex-row-reverse" : "flex-row"
@@ -1991,10 +2067,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   {/* 图片预览 */}
                   {message.images && message.images.length > 0 ? (
                     <motion.div
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ duration: 0.2 }}
-                      className="mt-3 space-y-2"
+                      variants={imagePreviewVariants}
+                      initial="hidden"
+                      animate="visible"
+                      className="mt-3 space-y-2 gpu-accelerated"
                     >
                       {message.images.map((imageDataUrl, idx) => {
                         console.log(`🖼️ 渲染图片 ${idx + 1}, 数据URL长度: ${imageDataUrl.length}`);
@@ -2064,7 +2140,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                           className="mt-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg"
                         >
                           <p className="text-sm text-yellow-800 dark:text-yellow-200 mb-1">
-                            ⚠️ 图片预览加载失败
+                            图片预览加载失败
                           </p>
                           <p className="text-xs text-yellow-600 dark:text-yellow-400">
                             文件已保存到: {paths[0]}
@@ -2087,20 +2163,46 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   }`}>
                     {/* 复制按钮 */}
                     <button
-                      onClick={() => handleCopyMessage(message.content)}
-                      className={`flex items-center justify-center w-6 h-6 rounded transition-all hover:bg-gray-100 dark:hover:bg-gray-800 ${
-                        message.role === "user"
+                      onClick={() => handleCopyMessage(message.content, message.id)}
+                      className={`relative flex items-center justify-center w-6 h-6 rounded hover:bg-gray-100 dark:hover:bg-gray-800 active:scale-95 transition-transform ${
+                        copiedMessageId === message.id
+                          ? "text-green-500 dark:text-green-400"
+                          : message.role === "user"
                           ? "text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                           : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
                       }`}
-                      title="复制消息"
+                      title={copiedMessageId === message.id ? "已复制" : "复制消息"}
                     >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      {/* 复制图标 */}
+                      <svg
+                        className={`w-3.5 h-3.5 absolute transition-opacity duration-200 ${
+                          copiedMessageId === message.id ? "opacity-0" : "opacity-100"
+                        }`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           strokeWidth={2}
                           d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        />
+                      </svg>
+                      {/* 对勾图标 */}
+                      <svg
+                        className={`w-3.5 h-3.5 absolute transition-opacity duration-200 ${
+                          copiedMessageId === message.id ? "opacity-100" : "opacity-0"
+                        }`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M5 13l4 4L19 7"
                         />
                       </svg>
                     </button>
@@ -2237,7 +2339,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
               ref={fileInputRef}
               type="file"
               style={{ display: "none" }}
-              webkitdirectory=""
+              {...{ webkitdirectory: "" } as any}
               multiple={false}
               onChange={(e) => {
                 const files = e.target.files;
@@ -2257,6 +2359,13 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         </div>
       </div>
       </div>
+      
+      {/* 用户输入对话框（登录、验证码） */}
+      <UserInputDialog
+        request={userInputRequest}
+        onSubmit={handleUserInputSubmit}
+        onCancel={handleUserInputCancel}
+      />
     </div>
   );
 };

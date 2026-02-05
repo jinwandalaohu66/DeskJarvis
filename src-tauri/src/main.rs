@@ -88,21 +88,11 @@ async fn execute_task(window: Window, instruction: String, context: Option<serde
             // 发送进度事件到前端
             window.emit("task-progress", &event)
                 .map_err(|e| format!("发送进度事件失败: {}", e))?;
-            
-            // 如果是任务完成事件，提取最终结果
-            if event.event_type == "task_completed" {
-                if let Some(result_value) = event.data.get("result") {
-                    if let Ok(result) = serde_json::from_value::<TaskResult>(result_value.clone()) {
-                        final_result = Some(result);
-                    }
-                }
-            } else if event.event_type == "task_failed" {
-                if let Some(result_value) = event.data.get("result") {
-                    if let Ok(result) = serde_json::from_value::<TaskResult>(result_value.clone()) {
-                        final_result = Some(result);
-                    }
-                }
-            }
+        }
+        
+        // 尝试直接解析为TaskResult（最后一行通常是最终结果）
+        if let Ok(result) = serde_json::from_str::<TaskResult>(&line) {
+            final_result = Some(result);
         }
     }
     
@@ -216,6 +206,24 @@ fn get_default_sandbox_path() -> String {
 
 /// 获取Python解释器路径
 fn get_python_path() -> Result<String, String> {
+    // 优先使用 python3.12（已安装记忆系统依赖）
+    if Command::new("/usr/local/bin/python3.12")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Ok("/usr/local/bin/python3.12".to_string());
+    }
+    
+    // 尝试 python3.12
+    if Command::new("python3.12")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        return Ok("python3.12".to_string());
+    }
+    
     // 尝试python3
     if Command::new("python3")
         .arg("--version")
@@ -287,12 +295,109 @@ fn get_agent_path() -> Result<String, String> {
     ))
 }
 
+/// 打开文件（使用系统默认应用）
+#[tauri::command]
+async fn open_file(path: String) -> Result<(), String> {
+    use std::process::Command;
+    
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("打开文件失败: {}", e))?;
+    }
+    
+    Ok(())
+}
+
+/// 提交用户输入（用于登录、验证码等交互场景）
+#[tauri::command]
+async fn submit_user_input(request_id: String, values: serde_json::Value) -> Result<bool, String> {
+    use std::fs;
+    
+    // 获取用户目录
+    let home = dirs::home_dir().ok_or("无法获取用户目录")?;
+    let response_file = home.join(".deskjarvis").join("user_input_response.json");
+    
+    // 确保目录存在
+    if let Some(parent) = response_file.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    
+    // 写入响应
+    let response = serde_json::json!({
+        "request_id": request_id,
+        "values": values,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    });
+    
+    fs::write(&response_file, response.to_string())
+        .map_err(|e| format!("写入响应失败: {}", e))?;
+    
+    Ok(true)
+}
+
+/// 取消用户输入请求
+#[tauri::command]
+async fn cancel_user_input(request_id: String) -> Result<bool, String> {
+    use std::fs;
+    
+    let home = dirs::home_dir().ok_or("无法获取用户目录")?;
+    let response_file = home.join(".deskjarvis").join("user_input_response.json");
+    
+    if let Some(parent) = response_file.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    
+    let response = serde_json::json!({
+        "request_id": request_id,
+        "cancelled": true,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    });
+    
+    fs::write(&response_file, response.to_string())
+        .map_err(|e| format!("写入响应失败: {}", e))?;
+    
+    Ok(true)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
-        .invoke_handler(tauri::generate_handler![execute_task, get_config, save_config])
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![
+            execute_task, 
+            get_config, 
+            save_config,
+            open_file,
+            submit_user_input,
+            cancel_user_input
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

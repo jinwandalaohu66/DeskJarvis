@@ -39,14 +39,21 @@ export const Settings: React.FC<SettingsProps> = ({
       "claude-3-sonnet-20240229",
       "claude-3-haiku-20240307",
     ],
+    anthropic: [
+      "claude-3-5-sonnet-20241022",
+      "claude-3-opus-20240229",
+      "claude-3-sonnet-20240229",
+      "claude-3-haiku-20240307",
+    ],
     openai: [
       "gpt-4-turbo-preview",
       "gpt-4",
       "gpt-3.5-turbo",
     ],
     deepseek: [
-      "deepseek-chat",
-      "deepseek-coder",
+      "deepseek-chat",      // DeepSeek-V3，最强通用模型
+      "deepseek-reasoner",  // DeepSeek-R1，推理专用
+      "deepseek-coder",     // 代码专用模型
     ],
     grok: [
       "grok-beta",

@@ -11,3 +11,14 @@ playwright>=1.48.0
 # 工具库
 python-dotenv>=1.0.0
 python-docx>=1.1.0  # Word文档处理
+
+# 记忆系统依赖
+chromadb>=0.4.0              # 向量数据库（本地存储）
+sentence-transformers>=2.2.0  # 文本嵌入模型（语义搜索）
+
+# 多代理协作系统（使用内置 SimpleCrew，无额外依赖）
+# 注：CrewAI 因依赖冲突已移除，使用原生实现替代
+
+# 可选依赖（增强功能）
+# Pillow>=10.0.0             # 图片处理（多模态记忆）
+# pyperclip>=1.8.0           # 剪贴板操作

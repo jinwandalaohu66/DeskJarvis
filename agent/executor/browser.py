@@ -4,13 +4,15 @@
 遵循 docs/ARCHITECTURE.md 中的Executor模块规范
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 import logging
 import time
+import base64
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 from agent.tools.exceptions import BrowserError
 from agent.tools.config import Config
+from agent.user_input import UserInputManager
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +26,29 @@ class BrowserExecutor:
     - 执行导航、点击、填写等操作
     - 下载文件
     - 截图（用于调试）
+    - 处理登录和验证码（请求用户输入）
     """
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, emit_callback: Optional[Callable] = None):
         """
         初始化浏览器执行器
         
         Args:
             config: 配置对象
+            emit_callback: 事件发送回调函数
         """
         self.config = config
+        self.emit = emit_callback
         self.playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.download_path = config.sandbox_path / "downloads"
         self.download_path.mkdir(parents=True, exist_ok=True)
+        
+        # 用户输入管理器
+        self.user_input_manager = UserInputManager(emit_callback=emit_callback)
+        
         logger.info(f"浏览器执行器已初始化，下载目录: {self.download_path}")
     
     def start(self) -> None:
@@ -54,13 +63,26 @@ class BrowserExecutor:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                ]
             )
             self.context = self.browser.new_context(
                 accept_downloads=True,
-                viewport={"width": 1920, "height": 1080}
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="zh-CN",
             )
             self.page = self.context.new_page()
+            
+            # 隐藏自动化特征
+            self.page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            """)
+            
             logger.info("✅ 浏览器已启动")
         except Exception as e:
             error_msg = f"启动浏览器失败: {str(e)}"
@@ -113,6 +135,14 @@ class BrowserExecutor:
                 return self._screenshot(params)
             elif step_type == "download_file":
                 return self._download_file(params)
+            elif step_type == "request_login":
+                return self._request_login(params)
+            elif step_type == "request_captcha":
+                return self._request_captcha(params)
+            elif step_type == "fill_login":
+                return self._fill_login(params)
+            elif step_type == "fill_captcha":
+                return self._fill_captcha(params)
             else:
                 raise BrowserError(f"未知的步骤类型: {step_type}")
                 
@@ -150,7 +180,23 @@ class BrowserExecutor:
         
         try:
             logger.info(f"导航到: {url}")
-            self.page.goto(url, wait_until="networkidle", timeout=60000)
+            self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            
+            # 额外等待一下让页面完全渲染
+            self.page.wait_for_timeout(1000)
+            
+            # 尝试关闭常见的弹窗/Cookie提示
+            try:
+                # 针对百度，执行特殊处理
+                if "baidu.com" in url:
+                    self._handle_baidu_popups()
+                else:
+                    # 其他网站按 Escape 关闭弹窗
+                    self.page.keyboard.press("Escape")
+                    self.page.wait_for_timeout(300)
+            except Exception:
+                pass
+            
             logger.info(f"✅ 已导航到: {url}")
             
             return {
@@ -312,7 +358,83 @@ class BrowserExecutor:
         
         try:
             logger.info(f"填写字段: {selector} = {value}")
-            self.page.fill(selector, str(value))
+            
+            # 先尝试等待元素可见
+            try:
+                self.page.wait_for_selector(selector, state="visible", timeout=5000)
+            except Exception:
+                # 如果等待失败，尝试关闭弹窗
+                logger.info("元素不可见，尝试关闭可能的弹窗...")
+                
+                # 检查是否是百度页面
+                current_url = self.page.url
+                if "baidu.com" in current_url:
+                    self._handle_baidu_popups()
+                else:
+                    try:
+                        self.page.keyboard.press("Escape")
+                        self.page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+                
+                # 对于百度等网站，尝试备用选择器
+                if selector == "#kw" or selector == "input[name='wd']":
+                    backup_selectors = [
+                        "#kw",
+                        "input[name='wd']",
+                        ".s_ipt",
+                        "input.s_ipt",
+                    ]
+                    for backup in backup_selectors:
+                        try:
+                            elem = self.page.locator(backup).first
+                            if elem.is_visible(timeout=2000):
+                                selector = backup
+                                logger.info(f"使用备用选择器: {backup}")
+                                break
+                        except Exception:
+                            continue
+            
+            # 尝试填写
+            try:
+                self.page.fill(selector, str(value), timeout=10000)
+            except Exception as fill_err:
+                logger.info(f"fill 失败: {fill_err}，尝试其他方式...")
+                
+                # 方法2：使用 JavaScript 直接设置值
+                try:
+                    js_selectors = ["#kw", "input[name='wd']", ".s_ipt"]
+                    for js_sel in js_selectors:
+                        result = self.page.evaluate(f'''
+                            (function() {{
+                                var input = document.querySelector("{js_sel}");
+                                if (input) {{
+                                    input.value = "{value}";
+                                    input.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                                    return true;
+                                }}
+                                return false;
+                            }})()
+                        ''')
+                        if result:
+                            logger.info(f"使用 JavaScript 成功填写: {js_sel}")
+                            break
+                    else:
+                        raise Exception("JavaScript 填写也失败")
+                except Exception as js_err:
+                    # 方法3：点击后逐字输入
+                    logger.info(f"JavaScript 失败: {js_err}，尝试 type 方式...")
+                    try:
+                        self.page.click(selector, timeout=5000, force=True)
+                        self.page.keyboard.type(str(value), delay=50)
+                    except Exception:
+                        # 方法4：强制点击
+                        self.page.evaluate(f'''
+                            var input = document.querySelector("#kw") || document.querySelector("input[name='wd']");
+                            if (input) {{ input.focus(); input.click(); }}
+                        ''')
+                        self.page.keyboard.type(str(value), delay=50)
+            
             logger.info(f"✅ 已填写字段")
             
             return {
@@ -324,6 +446,58 @@ class BrowserExecutor:
             error_msg = f"填写字段失败: {selector} - {str(e)}"
             logger.error(error_msg, exc_info=True)
             raise BrowserError(error_msg)
+    
+    def _handle_baidu_popups(self):
+        """处理百度页面的各种弹窗"""
+        logger.info("处理百度页面弹窗...")
+        
+        try:
+            # 等待页面稳定
+            self.page.wait_for_timeout(1000)
+            
+            # 1. 关闭登录弹窗（多种可能的关闭按钮）
+            close_selectors = [
+                "#TANGRAM__PSP_4__closeBtn",
+                ".tang-pass-footerBar .close-btn",
+                ".passport-login-pop .close",
+                "[class*='close']",
+                ".c-icon-close",
+            ]
+            for sel in close_selectors:
+                try:
+                    close_btn = self.page.locator(sel).first
+                    if close_btn.is_visible(timeout=500):
+                        close_btn.click(timeout=1000)
+                        logger.info(f"已关闭弹窗: {sel}")
+                        self.page.wait_for_timeout(300)
+                        break
+                except Exception:
+                    continue
+            
+            # 2. 按 Escape 键
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(300)
+            
+            # 3. 点击页面空白处
+            try:
+                self.page.mouse.click(10, 10)
+                self.page.wait_for_timeout(200)
+            except Exception:
+                pass
+            
+            # 4. 如果搜索框还是不可见，尝试刷新页面
+            try:
+                kw_visible = self.page.locator("#kw").is_visible(timeout=1000)
+                if not kw_visible:
+                    logger.info("搜索框不可见，尝试刷新页面...")
+                    self.page.reload(wait_until="domcontentloaded", timeout=10000)
+                    self.page.wait_for_timeout(1000)
+                    self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+                
+        except Exception as e:
+            logger.warning(f"处理百度弹窗时出错: {e}")
     
     def _wait(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """等待指定时间或条件"""
@@ -641,3 +815,465 @@ class BrowserExecutor:
         except AttributeError:
             suggested_filename = "未知文件名"
         logger.info(f"检测到下载: {suggested_filename}")
+    
+    # ===== 登录和验证码处理 =====
+    
+    def _request_login(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        请求用户输入登录信息（智能检测登录表单）
+        
+        Args:
+            params: 参数字典
+                - site_name: 网站名称
+                - username_selector: 用户名输入框选择器（可选，会自动检测）
+                - password_selector: 密码输入框选择器（可选，会自动检测）
+                - submit_selector: 提交按钮选择器（可选）
+                - username_label: 用户名标签（可选）
+                - password_label: 密码标签（可选）
+        
+        Returns:
+            执行结果字典
+        """
+        site_name = params.get("site_name", "网站")
+        username_selector = params.get("username_selector")
+        password_selector = params.get("password_selector")
+        submit_selector = params.get("submit_selector")
+        username_label = params.get("username_label", "用户名")
+        password_label = params.get("password_label", "密码")
+        
+        try:
+            logger.info(f"请求用户登录信息: {site_name}")
+            
+            # 如果没有提供选择器，尝试自动检测
+            if not username_selector or not password_selector:
+                logger.info("未提供选择器，尝试自动检测登录表单...")
+                detected = self.detect_login_form()
+                
+                # 如果没有检测到登录表单，尝试点击"登录"链接进入登录页面
+                if not detected:
+                    logger.info("未检测到登录表单，尝试点击登录链接...")
+                    login_clicked = self._try_click_login_link()
+                    if login_clicked:
+                        self.page.wait_for_timeout(2000)  # 等待登录页面加载
+                        detected = self.detect_login_form()
+                
+                if detected:
+                    username_selector = username_selector or detected.get("username_selector")
+                    password_selector = password_selector or detected.get("password_selector")
+                    submit_selector = submit_selector or detected.get("submit_selector")
+                    logger.info(f"自动检测到登录表单: 用户名={username_selector}, 密码={password_selector}")
+            
+            # 请求用户输入
+            credentials = self.user_input_manager.request_login(
+                site_name=site_name,
+                username_label=username_label,
+                password_label=password_label,
+                message=f"请输入您在 {site_name} 的登录信息"
+            )
+            
+            if not credentials:
+                return {
+                    "success": False,
+                    "message": "用户取消了登录",
+                    "data": None
+                }
+            
+            username = credentials.get("username", "")
+            password = credentials.get("password", "")
+            
+            # 尝试填写用户名
+            filled_username = False
+            if username_selector:
+                filled_username = self._try_fill_field(username_selector, username, "用户名")
+            
+            # 如果指定的选择器失败，尝试常见选择器
+            if not filled_username:
+                common_username_selectors = [
+                    "input[type='text']:visible",
+                    "input[name*='user']",
+                    "input[name*='account']",
+                    "input[name*='login']",
+                    "input[id*='user']",
+                    "input[id*='account']",
+                    "input[placeholder*='用户名']",
+                    "input[placeholder*='账号']",
+                    "input[placeholder*='手机']",
+                    "input[placeholder*='邮箱']",
+                ]
+                for sel in common_username_selectors:
+                    if self._try_fill_field(sel, username, "用户名"):
+                        filled_username = True
+                        break
+            
+            if not filled_username:
+                # 截图帮助调试
+                screenshot_path = self.download_path / f"login_error_{int(time.time())}.png"
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
+                return {
+                    "success": False,
+                    "message": f"无法找到用户名输入框，已截图: {screenshot_path}",
+                    "data": None
+                }
+            
+            # 尝试填写密码
+            filled_password = False
+            if password_selector:
+                filled_password = self._try_fill_field(password_selector, password, "密码")
+            
+            if not filled_password:
+                common_password_selectors = [
+                    "input[type='password']",
+                    "input[name*='pass']",
+                    "input[name*='pwd']",
+                    "input[id*='pass']",
+                    "input[id*='pwd']",
+                ]
+                for sel in common_password_selectors:
+                    if self._try_fill_field(sel, password, "密码"):
+                        filled_password = True
+                        break
+            
+            if not filled_password:
+                screenshot_path = self.download_path / f"login_error_{int(time.time())}.png"
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
+                return {
+                    "success": False,
+                    "message": f"无法找到密码输入框，已截图: {screenshot_path}",
+                    "data": None
+                }
+            
+            # 点击提交按钮
+            if submit_selector:
+                try:
+                    logger.info(f"点击提交按钮: {submit_selector}")
+                    self.page.click(submit_selector, timeout=5000)
+                    self.page.wait_for_timeout(2000)
+                except Exception as e:
+                    logger.warning(f"点击提交按钮失败: {e}，尝试其他方式...")
+                    # 尝试按回车
+                    self.page.keyboard.press("Enter")
+                    self.page.wait_for_timeout(2000)
+            
+            logger.info(f"✅ 登录信息已填写")
+            
+            return {
+                "success": True,
+                "message": f"已填写登录信息",
+                "data": {"site_name": site_name}
+            }
+            
+        except Exception as e:
+            error_msg = f"请求登录失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            # 截图帮助调试
+            try:
+                screenshot_path = self.download_path / f"login_error_{int(time.time())}.png"
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
+                error_msg += f"，已截图: {screenshot_path}"
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "message": error_msg,
+                "data": None
+            }
+    
+    def _try_fill_field(self, selector: str, value: str, field_name: str) -> bool:
+        """尝试填写字段，返回是否成功"""
+        try:
+            element = self.page.locator(selector).first
+            if element.is_visible(timeout=2000):
+                element.fill(value, timeout=5000)
+                logger.info(f"✅ 成功填写{field_name}: {selector}")
+                return True
+        except Exception as e:
+            logger.debug(f"填写{field_name}失败 ({selector}): {e}")
+        return False
+    
+    def _try_click_login_link(self) -> bool:
+        """尝试点击页面上的登录链接/按钮"""
+        login_selectors = [
+            # 文本匹配
+            "a:has-text('登录')",
+            "a:has-text('登陆')",
+            "button:has-text('登录')",
+            "button:has-text('登陆')",
+            "span:has-text('登录')",
+            "div:has-text('登录')",
+            # 英文
+            "a:has-text('Login')",
+            "a:has-text('Sign in')",
+            "a:has-text('Log in')",
+            # 常见选择器
+            "a[href*='login']",
+            "a[href*='signin']",
+            ".login-btn",
+            ".login-link",
+            "#login-link",
+        ]
+        
+        for selector in login_selectors:
+            try:
+                element = self.page.locator(selector).first
+                if element.is_visible(timeout=1000):
+                    logger.info(f"找到登录链接: {selector}")
+                    element.click(timeout=5000)
+                    logger.info(f"✅ 已点击登录链接")
+                    return True
+            except Exception as e:
+                logger.debug(f"点击登录链接失败 ({selector}): {e}")
+                continue
+        
+        logger.warning("未找到登录链接")
+        return False
+    
+    def _request_captcha(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        请求用户输入验证码
+        
+        Args:
+            params: 参数字典
+                - captcha_image_selector: 验证码图片选择器
+                - captcha_input_selector: 验证码输入框选择器
+                - site_name: 网站名称（可选）
+        
+        Returns:
+            执行结果字典
+        """
+        captcha_image_selector = params.get("captcha_image_selector")
+        captcha_input_selector = params.get("captcha_input_selector")
+        site_name = params.get("site_name", "网站")
+        
+        if not captcha_image_selector or not captcha_input_selector:
+            raise BrowserError("请求验证码需要 captcha_image_selector 和 captcha_input_selector")
+        
+        try:
+            logger.info(f"请求验证码输入: {site_name}")
+            
+            # 截取验证码图片
+            captcha_element = self.page.locator(captcha_image_selector).first
+            captcha_element.wait_for(state="visible", timeout=10000)
+            
+            # 获取验证码图片的 base64
+            captcha_bytes = captcha_element.screenshot()
+            captcha_base64 = base64.b64encode(captcha_bytes).decode("utf-8")
+            captcha_data_url = f"data:image/png;base64,{captcha_base64}"
+            
+            logger.info(f"验证码图片已截取")
+            
+            # 请求用户输入验证码
+            captcha_text = self.user_input_manager.request_captcha(
+                captcha_image=captcha_data_url,
+                site_name=site_name,
+                message="请输入图片中的验证码"
+            )
+            
+            if not captcha_text:
+                return {
+                    "success": False,
+                    "message": "用户取消了验证码输入",
+                    "data": None
+                }
+            
+            # 填写验证码
+            logger.info(f"填写验证码: {captcha_input_selector}")
+            self.page.fill(captcha_input_selector, captcha_text, timeout=10000)
+            
+            logger.info(f"✅ 验证码已填写")
+            
+            return {
+                "success": True,
+                "message": f"已填写验证码",
+                "data": {"captcha": captcha_text}
+            }
+            
+        except Exception as e:
+            error_msg = f"请求验证码失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return {
+                "success": False,
+                "message": error_msg,
+                "data": None
+            }
+    
+    def _fill_login(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        填写登录表单（用于 AI 规划时生成的步骤）
+        
+        Args:
+            params: 参数字典
+                - site_name: 网站名称
+                - username_selector: 用户名输入框选择器
+                - password_selector: 密码输入框选择器
+                - submit_selector: 提交按钮选择器（可选）
+        
+        Returns:
+            执行结果字典
+        """
+        return self._request_login(params)
+    
+    def _fill_captcha(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        填写验证码（用于 AI 规划时生成的步骤）
+        
+        Args:
+            params: 参数字典
+                - captcha_image_selector: 验证码图片选择器
+                - captcha_input_selector: 验证码输入框选择器
+                - site_name: 网站名称（可选）
+        
+        Returns:
+            执行结果字典
+        """
+        return self._request_captcha(params)
+    
+    def detect_login_form(self) -> Optional[Dict[str, Any]]:
+        """
+        检测页面上是否有登录表单
+        
+        Returns:
+            如果检测到登录表单，返回表单信息；否则返回 None
+        """
+        if not self.page:
+            return None
+        
+        try:
+            # 常见的登录表单选择器
+            login_indicators = [
+                # 用户名/账号输入框
+                ("username", [
+                    "input[name='username']",
+                    "input[name='user']",
+                    "input[name='account']",
+                    "input[name='login']",
+                    "input[name='email']",
+                    "input[type='email']",
+                    "input[id*='user']",
+                    "input[id*='account']",
+                    "input[id*='login']",
+                    "input[placeholder*='用户名']",
+                    "input[placeholder*='账号']",
+                    "input[placeholder*='手机号']",
+                    "input[placeholder*='邮箱']",
+                ]),
+                # 密码输入框
+                ("password", [
+                    "input[type='password']",
+                    "input[name='password']",
+                    "input[name='pwd']",
+                    "input[id*='password']",
+                    "input[id*='pwd']",
+                ]),
+            ]
+            
+            detected = {}
+            
+            for field_name, selectors in login_indicators:
+                for selector in selectors:
+                    try:
+                        element = self.page.locator(selector).first
+                        if element.is_visible(timeout=1000):
+                            detected[field_name + "_selector"] = selector
+                            break
+                    except Exception:
+                        continue
+            
+            # 如果同时检测到用户名和密码输入框，认为是登录表单
+            if "username_selector" in detected and "password_selector" in detected:
+                # 尝试检测提交按钮
+                submit_selectors = [
+                    "button[type='submit']",
+                    "input[type='submit']",
+                    "button:has-text('登录')",
+                    "button:has-text('登陆')",
+                    "button:has-text('Sign in')",
+                    "button:has-text('Login')",
+                    "[class*='submit']",
+                    "[class*='login-btn']",
+                ]
+                for selector in submit_selectors:
+                    try:
+                        element = self.page.locator(selector).first
+                        if element.is_visible(timeout=500):
+                            detected["submit_selector"] = selector
+                            break
+                    except Exception:
+                        continue
+                
+                logger.info(f"检测到登录表单: {detected}")
+                return detected
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"检测登录表单时出错: {e}")
+            return None
+    
+    def detect_captcha(self) -> Optional[Dict[str, Any]]:
+        """
+        检测页面上是否有验证码
+        
+        Returns:
+            如果检测到验证码，返回验证码信息；否则返回 None
+        """
+        if not self.page:
+            return None
+        
+        try:
+            # 常见的验证码选择器
+            captcha_image_selectors = [
+                "img[src*='captcha']",
+                "img[src*='verify']",
+                "img[src*='code']",
+                "img[id*='captcha']",
+                "img[id*='verify']",
+                "img[class*='captcha']",
+                "img[class*='verify']",
+                ".captcha img",
+                ".verify-img",
+                "#captcha-img",
+            ]
+            
+            captcha_input_selectors = [
+                "input[name='captcha']",
+                "input[name='verify']",
+                "input[name='code']",
+                "input[id*='captcha']",
+                "input[id*='verify']",
+                "input[placeholder*='验证码']",
+                "input[placeholder*='验证']",
+                "input[placeholder*='captcha']",
+            ]
+            
+            detected = {}
+            
+            # 检测验证码图片
+            for selector in captcha_image_selectors:
+                try:
+                    element = self.page.locator(selector).first
+                    if element.is_visible(timeout=500):
+                        detected["captcha_image_selector"] = selector
+                        break
+                except Exception:
+                    continue
+            
+            # 检测验证码输入框
+            for selector in captcha_input_selectors:
+                try:
+                    element = self.page.locator(selector).first
+                    if element.is_visible(timeout=500):
+                        detected["captcha_input_selector"] = selector
+                        break
+                except Exception:
+                    continue
+            
+            # 如果同时检测到验证码图片和输入框，认为是验证码
+            if "captcha_image_selector" in detected and "captcha_input_selector" in detected:
+                logger.info(f"检测到验证码: {detected}")
+                return detected
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"检测验证码时出错: {e}")
+            return None

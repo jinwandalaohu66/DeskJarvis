@@ -8,7 +8,7 @@ import React, { useState, useEffect } from "react";
 import { ChatInterface } from "./components/ChatInterface";
 import { Settings } from "./components/Settings";
 import { ProgressPanel } from "./components/ProgressPanel";
-import { AppConfig, TaskStatus, LogEntry } from "./types";
+import { AppConfig, TaskStatus, LogEntry, AgentType, ExecutionMode } from "./types";
 import { getConfig } from "./utils/tauri";
 
 type Page = "chat" | "settings";
@@ -28,6 +28,10 @@ export const App: React.FC = () => {
   const [taskSteps, setTaskSteps] = useState<Array<{ step: any; result?: any }>>([]);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
   const [taskLogs, setTaskLogs] = useState<LogEntry[]>([]);
+  
+  // 多代理协作状态
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("single-agent");
+  const [activeAgent, setActiveAgent] = useState<AgentType | undefined>(undefined);
 
   useEffect(() => {
     // 加载配置
@@ -54,8 +58,8 @@ export const App: React.FC = () => {
     } catch (error) {
       console.error("[App] 加载配置失败:", error);
       // 如果加载失败，使用默认配置
-      const defaultConfig = {
-        provider: "claude",
+      const defaultConfig: AppConfig = {
+        provider: "claude" as const,
         api_key: "",
         model: "claude-3-5-sonnet-20241022",
         sandbox_path: "",
@@ -91,7 +95,8 @@ export const App: React.FC = () => {
       <main className="flex-1 overflow-hidden flex">
         {/* 左侧：聊天或设置 */}
         <div className="flex-1 overflow-hidden flex flex-col">
-          {currentPage === "chat" && (
+          {/* 使用 CSS 隐藏而不是卸载，保持聊天状态 */}
+          <div className={`flex-1 overflow-hidden ${currentPage === "chat" ? "block" : "hidden"}`}>
             <ChatInterface
               config={config}
               onStepsChange={setTaskSteps}
@@ -99,8 +104,10 @@ export const App: React.FC = () => {
               onLogsChange={setTaskLogs}
               onStatusChange={setTaskStatus}
               onProgressPanelToggle={() => setProgressCollapsed(!progressCollapsed)}
+              onExecutionModeChange={setExecutionMode}
+              onActiveAgentChange={setActiveAgent}
             />
-          )}
+          </div>
           {currentPage === "settings" && (
             <Settings 
               config={config} 
@@ -119,6 +126,8 @@ export const App: React.FC = () => {
             steps={taskSteps}
             currentStepIndex={currentStepIndex}
             logs={taskLogs}
+            activeAgent={activeAgent}
+            executionMode={executionMode}
           />
         )}
       </main>

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from agent.tools.exceptions import BrowserError
 from agent.tools.config import Config
+from agent.executor.code_interpreter import CodeInterpreter
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +26,22 @@ class SystemTools:
     - 系统命令执行（未来扩展）
     """
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, emit_callback=None):
         """
         初始化系统工具
         
         Args:
             config: 配置对象
+            emit_callback: 进度回调函数
         """
         self.config = config
+        self.emit = emit_callback
         self.sandbox_path = Path(config.sandbox_path).resolve()
         self.sandbox_path.mkdir(parents=True, exist_ok=True)
+        
+        # 初始化增强版代码解释器
+        self.code_interpreter = CodeInterpreter(self.sandbox_path, emit_callback)
+        
         logger.info(f"系统工具已初始化，沙盒目录: {self.sandbox_path}")
     
     def _find_folder(self, folder_name: str, search_dirs: List[Path] = None) -> Optional[Path]:
@@ -142,6 +149,66 @@ class SystemTools:
                 return self._close_app(params)
             elif step_type == "execute_python_script":
                 return self._execute_python_script(params)
+            # ========== 新增系统控制功能 ==========
+            elif step_type == "set_volume":
+                return self._set_volume(params)
+            elif step_type == "set_brightness":
+                return self._set_brightness(params)
+            elif step_type == "send_notification":
+                return self._send_notification(params)
+            elif step_type == "clipboard_read":
+                return self._clipboard_read(params)
+            elif step_type == "clipboard_write":
+                return self._clipboard_write(params)
+            elif step_type == "keyboard_type":
+                return self._keyboard_type(params)
+            elif step_type == "keyboard_shortcut":
+                return self._keyboard_shortcut(params)
+            elif step_type == "mouse_click":
+                return self._mouse_click(params)
+            elif step_type == "mouse_move":
+                return self._mouse_move(params)
+            elif step_type == "window_minimize":
+                return self._window_minimize(params)
+            elif step_type == "window_maximize":
+                return self._window_maximize(params)
+            elif step_type == "window_close":
+                return self._window_close(params)
+            elif step_type == "speak":
+                return self._speak(params)
+            # ========== 系统信息和图片处理 ==========
+            elif step_type == "get_system_info":
+                return self._get_system_info(params)
+            elif step_type == "image_process":
+                return self._image_process(params)
+            # ========== 定时提醒 ==========
+            elif step_type == "set_reminder":
+                return self._set_reminder(params)
+            elif step_type == "list_reminders":
+                return self._list_reminders(params)
+            elif step_type == "cancel_reminder":
+                return self._cancel_reminder(params)
+            # ========== 工作流 ==========
+            elif step_type == "create_workflow":
+                return self._create_workflow(params)
+            elif step_type == "list_workflows":
+                return self._list_workflows(params)
+            elif step_type == "delete_workflow":
+                return self._delete_workflow(params)
+            # ========== 任务历史 ==========
+            elif step_type == "get_task_history":
+                return self._get_task_history(params)
+            elif step_type == "search_history":
+                return self._search_history(params)
+            elif step_type == "add_favorite":
+                return self._add_favorite(params)
+            elif step_type == "list_favorites":
+                return self._list_favorites(params)
+            elif step_type == "remove_favorite":
+                return self._remove_favorite(params)
+            # ========== 文本AI处理 ==========
+            elif step_type == "text_process":
+                return self._text_process(params)
             else:
                 raise BrowserError(f"未知的系统操作类型: {step_type}")
                 
@@ -870,13 +937,19 @@ class SystemTools:
     
     def _execute_python_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        执行Python脚本
+        执行Python脚本 - 增强版（使用 CodeInterpreter）
+        
+        功能：
+        - 自动检测并安装缺失的 Python 包
+        - Matplotlib 图表自动保存
+        - 智能错误修复和自动重试
+        - 代码执行结果记忆
         
         Args:
             params: 包含script（Python脚本代码，必需）、reason（原因，可选）、safety（安全检查说明，可选）
         
         Returns:
-            执行结果，包含success、message、data等
+            执行结果，包含success、message、data、images等
         """
         script = params.get("script")
         if not script:
@@ -887,10 +960,63 @@ class SystemTools:
         
         reason = params.get("reason", "未提供原因")
         safety = params.get("safety", "未提供安全检查说明")
+        auto_install = params.get("auto_install", True)  # 是否自动安装缺失的包
+        max_retries = params.get("max_retries", 2)  # 最大重试次数
         
         logger.info(f"执行Python脚本，原因: {reason}")
         logger.debug(f"安全检查说明: {safety}")
         logger.debug(f"脚本内容（前500字符）:\n{script[:500]}")
+        
+        # 使用增强版代码解释器执行
+        try:
+            result = self.code_interpreter.execute(
+                code=script,
+                reason=reason,
+                auto_install=auto_install,
+                max_retries=max_retries
+            )
+            
+            # 构建返回结果
+            response = {
+                "success": result.success,
+                "message": result.message,
+                "data": result.data
+            }
+            
+            # 如果有生成的图表，添加到结果中
+            if result.images:
+                response["images"] = result.images
+                response["message"] += f" (生成了 {len(result.images)} 个图表)"
+            
+            # 如果自动安装了包，添加信息
+            if result.installed_packages:
+                response["installed_packages"] = result.installed_packages
+                logger.info(f"自动安装了以下包: {', '.join(result.installed_packages)}")
+            
+            # 添加执行时间
+            response["execution_time"] = result.execution_time
+            
+            if not result.success and result.error:
+                response["error"] = result.error
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"执行脚本失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"执行脚本失败: {str(e)}",
+                "data": None,
+                "error": str(e)
+            }
+    
+    # === 保留旧方法作为备用（如果 CodeInterpreter 不可用）===
+    def _execute_python_script_legacy(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        执行Python脚本（旧版本，保留作为备用）
+        """
+        script = params.get("script")
+        reason = params.get("reason", "未提供原因")
         
         try:
             # 创建临时脚本文件
@@ -902,8 +1028,8 @@ class SystemTools:
             temp_script_dir.mkdir(parents=True, exist_ok=True)
             
             # 创建临时脚本文件
-            import time
-            temp_script_path = temp_script_dir / f"script_{int(time.time())}.py"
+            import time as time_module
+            temp_script_path = temp_script_dir / f"script_{int(time_module.time())}.py"
             
             # 处理脚本内容：可能是 base64 编码，也可能是普通字符串
             import base64
@@ -911,360 +1037,907 @@ class SystemTools:
             
             # 首先尝试 base64 解码
             try:
-                # 修复可能的 padding 问题
-                # 移除所有空白字符（包括换行符、空格等），因为 base64 字符串不应该包含这些
+                # 移除所有空白字符
                 script_clean = ''.join(script.split())
                 script_to_decode = script_clean.strip()
                 
-                # 修复 padding：如果长度不能被 4 整除，可能是字符串被截断了
-                original_len = len(script_to_decode)
-                missing_padding = original_len % 4
-                
+                # 修复 padding
+                missing_padding = len(script_to_decode) % 4
                 if missing_padding:
-                    # 先尝试添加 padding
-                    script_to_decode_padded = script_to_decode + '=' * (4 - missing_padding)
-                    logger.debug(f"修复 base64 padding，添加了 {4 - missing_padding} 个 =")
-                else:
-                    script_to_decode_padded = script_to_decode
+                    script_to_decode += '=' * (4 - missing_padding)
                 
-                # 先尝试严格模式
-                decoded_bytes = None
-                try:
-                    decoded_bytes = base64.b64decode(script_to_decode_padded, validate=True)
-                    logger.debug("base64 严格模式解码成功")
-                except Exception as strict_error:
-                    # 严格模式失败，尝试宽松模式
-                    logger.warning(f"base64 严格验证失败（{strict_error}），尝试宽松模式")
-                    try:
-                        decoded_bytes = base64.b64decode(script_to_decode_padded, validate=False)
-                        logger.debug("base64 宽松模式解码成功")
-                    except Exception as loose_error:
-                        # 如果添加 padding 后仍然失败，尝试移除最后几个字符（可能是截断的）
-                        if missing_padding:
-                            logger.warning(f"添加 padding 后仍然失败，尝试移除最后 {missing_padding} 个字符（可能是截断的）")
-                            try:
-                                script_truncated = script_to_decode[:-missing_padding]
-                                missing_truncated = len(script_truncated) % 4
-                                if missing_truncated:
-                                    script_truncated += '=' * (4 - missing_truncated)
-                                decoded_bytes = base64.b64decode(script_truncated, validate=False)
-                                logger.info("✅ 通过移除截断字符成功解码 base64")
-                            except Exception as truncate_error:
-                                # 所有尝试都失败，抛出异常让外层处理
-                                raise ValueError(f"base64 解码失败（严格模式: {strict_error}, 宽松模式: {loose_error}, 截断修复: {truncate_error}）")
-                        else:
-                            raise ValueError(f"base64 解码失败（严格模式: {strict_error}, 宽松模式: {loose_error}）")
-                
-                # 尝试 UTF-8 解码
-                try:
-                    script_content = decoded_bytes.decode("utf-8")
-                    logger.info("✅ 检测到 base64 编码的脚本，已成功解码")
-                except UnicodeDecodeError as utf8_error:
-                    # UTF-8 解码失败，尝试错误替换模式
-                    script_content = decoded_bytes.decode("utf-8", errors="replace")
-                    logger.warning(f"base64 解码成功，但 UTF-8 解码有错误（{utf8_error}），使用错误替换模式")
-                
-                # 立即清理控制字符（U+0000 到 U+001F，除了已允许的换行、制表符、回车）
-                import string
-                allowed_control_chars = {'\n', '\r', '\t'}  # 允许的控制字符
-                cleaned_chars = []
-                removed_count = 0
-                for char in script_content:
-                    char_code = ord(char)
-                    # 保留可打印字符、空格、以及允许的控制字符
-                    if char in string.printable or char in allowed_control_chars:
-                        cleaned_chars.append(char)
-                    elif char_code < 32:  # 控制字符（U+0000 到 U+001F）
-                        # 完全移除控制字符（U+0019 等），不替换为空格
-                        removed_count += 1
-                        logger.debug(f"移除控制字符: U+{char_code:04X}")
-                    else:
-                        # 其他字符（如中文、emoji等）保留
-                        cleaned_chars.append(char)
-                
-                if removed_count > 0:
-                    logger.warning(f"已移除 {removed_count} 个控制字符（U+0000 到 U+001F）")
-                    script_content = ''.join(cleaned_chars)
-            except Exception as decode_error:
-                # base64 解码失败，说明是普通字符串
-                logger.info(f"不是 base64 编码（{decode_error}），使用普通字符串格式")
-                script_content = script.replace("\\n", "\n")  # 将 \\n 转换为实际的换行符
-                
-                # 也清理普通字符串中的控制字符
-                import string
-                allowed_control_chars = {'\n', '\r', '\t'}
-                cleaned_chars = []
-                removed_count = 0
-                for char in script_content:
-                    char_code = ord(char)
-                    if char in string.printable or char in allowed_control_chars:
-                        cleaned_chars.append(char)
-                    elif char_code < 32:
-                        removed_count += 1
-                    else:
-                        cleaned_chars.append(char)
-                
-                if removed_count > 0:
-                    logger.warning(f"已移除 {removed_count} 个控制字符")
-                    script_content = ''.join(cleaned_chars)
-            
-            # 确保 script_content 不为空
-            if not script_content:
-                logger.error("脚本内容为空，使用原始内容")
-                script_content = script
-            
-            # 验证解码后的内容看起来像 Python 代码
-            if script_content and not script_content.strip().startswith(('import ', 'from ', 'def ', 'class ', 'try:', 'if ', 'print(', '#')):
-                # 如果解码后的内容不像 Python 代码，可能是解码失败，尝试作为普通字符串处理
-                logger.warning("解码后的内容不像 Python 代码，尝试作为普通字符串处理")
+                decoded_bytes = base64.b64decode(script_to_decode, validate=True)
+                script_content = decoded_bytes.decode("utf-8")
+            except Exception:
                 script_content = script.replace("\\n", "\n")
             
-            # 自动修复脚本中的常见问题
-            if script_content:
-                import urllib.parse
-                import re
-                
-                # 1. 修复 f-string 语法错误（f'""" 应该是 f"""）
-                # 查找 f'""" 或 f'""" 等错误的 f-string 语法
-                # 匹配 f'""" 或 f'""" 等模式
-                fstring_fix_pattern = r"f['\"]\"\"\""
-                def fix_fstring_quote(match):
-                    logger.warning("检测到错误的 f-string 语法（单引号+三引号混用），已修复为 f\"\"\"")
-                    return 'f"""'
-                
-                # 也修复 f'""" 的情况（单引号开头，三引号结尾）
-                fstring_fix_pattern2 = r"f'\"\"\""
-                fixed_content = re.sub(fstring_fix_pattern2, 'f"""', script_content)
-                if fixed_content != script_content:
-                    script_content = fixed_content
-                    logger.info("已修复 f-string 语法错误（f'\"\"\" -> f\"\"\"）")
-                
-                fixed_content = re.sub(fstring_fix_pattern, fix_fstring_quote, script_content)
-                if fixed_content != script_content:
-                    script_content = fixed_content
-                    logger.info("已修复 f-string 语法错误")
-                
-                # 2. 修复未闭合的 f-string（检测 f"""... 但未闭合的情况）
-                # 查找 f""" 开头但未正确闭合的字符串
-                unterminated_fstring_pattern = r"(f\"\"\"[^\"]{200,}?)([^\"])"
-                def fix_unterminated_fstring(match):
-                    content = match.group(1)  # f"""... 部分
-                    next_char = match.group(2)  # 下一个字符
-                    
-                    # 如果下一个字符不是引号，说明 f-string 未闭合
-                    if next_char not in ['"', '\n', ' ']:
-                        # 截断到合理长度并添加闭合引号
-                        truncated = content[:500] if len(content) > 500 else content
-                        # 尝试找到合理的结束点
-                        for i in range(len(truncated) - 1, len(truncated) - 100, -1):
-                            if i > 0 and truncated[i-1] in '。，！？\n':
-                                truncated = truncated[:i]
-                                break
-                        fixed_fstring = truncated + '"""'
-                        logger.warning(f"检测到未闭合的 f-string，已自动修复（截断到 {len(fixed_fstring)} 字符）")
-                        return fixed_fstring + next_char
-                    return match.group(0)
-                
-                fixed_content = re.sub(unterminated_fstring_pattern, fix_unterminated_fstring, script_content, flags=re.DOTALL)
-                if fixed_content != script_content:
-                    script_content = fixed_content
-                    logger.info("已尝试修复未闭合的 f-string")
-                
-                # 3. 修复未闭合的 message 字符串（检测超长的字符串，可能是字符串未闭合）
-                # 查找 print(json.dumps({"success": False, "message": "超长文本" 的模式
-                # 如果 message 字段的值超过200字符且没有闭合引号，截断并添加闭合引号
-                message_pattern = r'("message"\s*:\s*")([^"]{0,200})([^"]{200,}?)([",}])'
-                def fix_unterminated_message(match):
-                    prefix = match.group(1)  # "message": "
-                    normal_part = match.group(2)  # 前面的正常部分（最多200字符）
-                    long_part = match.group(3)  # 超长部分
-                    next_char = match.group(4)  # 下一个字符（" 或 , 或 }）
-                    
-                    # 如果下一个字符不是引号，说明字符串未闭合
-                    if next_char != '"':
-                        # 截断超长部分到合理长度（100字符）
-                        truncated = long_part[:100] if len(long_part) > 100 else long_part
-                        # 尝试找到合理的结束点
-                        for i in range(len(truncated), 0, -1):
-                            if truncated[i-1] in '。，！？':
-                                truncated = truncated[:i]
-                                break
-                        fixed_message = normal_part + truncated + '"'
-                        logger.warning(f"检测到未闭合的 message 字符串（长度 {len(normal_part) + len(long_part)}），已自动修复（截断到 {len(fixed_message)-1} 字符）")
-                        return prefix + fixed_message + next_char
-                    return match.group(0)  # 如果已经有闭合引号，保持原样
-                
-                # 尝试修复未闭合的 message 字符串
-                fixed_content = re.sub(message_pattern, fix_unterminated_message, script_content)
-                if fixed_content != script_content:
-                    script_content = fixed_content
-                    logger.info("已尝试修复未闭合的 message 字符串")
-                
-                # 2. 修复 URL 编码的文件路径（如果存在）
-                url_encoded_pattern = r'(["\'])([^"\']*%[0-9A-Fa-f]{2}[^"\']*)(["\'])'
-                def fix_url_encoded_path(match):
-                    quote_char = match.group(1)
-                    path = match.group(2)
-                    # 尝试解码 URL 编码的路径
-                    try:
-                        decoded_path = urllib.parse.unquote(path)
-                        if decoded_path != path:
-                            logger.info(f"检测到 URL 编码的文件路径，已自动修复: {path} -> {decoded_path}")
-                            return f'{quote_char}{decoded_path}{quote_char}'
-                    except Exception:
-                        pass
-                    return match.group(0)  # 如果解码失败，保持原样
-                
-                # 替换所有 URL 编码的文件路径
-                fixed_content = re.sub(url_encoded_pattern, fix_url_encoded_path, script_content)
-                if fixed_content != script_content:
-                    script_content = fixed_content
-                    logger.info("已自动修复脚本中的 URL 编码文件路径")
-                
-                # 3. 验证并修复基本的字符串闭合问题（简单但有效的方法）
-                # 统计引号数量，如果不匹配，尝试修复
-                single_quotes = script_content.count("'") - script_content.count("\\'")
-                double_quotes = script_content.count('"') - script_content.count('\\"')
-                
-                # 如果双引号数量是奇数，可能缺少闭合引号
-                if double_quotes % 2 == 1:
-                    # 尝试在最后一个 print(json.dumps(...)) 语句后添加闭合引号
-                    # 查找最后一个未闭合的字符串
-                    last_print_match = list(re.finditer(r'print\s*\(\s*json\.dumps\s*\([^)]*\)', script_content))
-                    if last_print_match:
-                        last_match = last_print_match[-1]
-                        # 检查匹配后的内容是否有未闭合的引号
-                        after_match = script_content[last_match.end():]
-                        if after_match.strip().startswith(')'):
-                            # 如果后面直接是右括号，说明字符串已经闭合
-                            pass
-                        else:
-                            # 尝试在合理的位置添加闭合引号
-                            # 查找下一个结构字符（逗号、右括号、右大括号）
-                            next_struct = re.search(r'[,)}\]]', after_match)
-                            if next_struct:
-                                insert_pos = last_match.end() + next_struct.start()
-                                script_content = script_content[:insert_pos] + '"' + script_content[insert_pos:]
-                                logger.warning("检测到未闭合的字符串，已自动添加闭合引号")
-            
+            # 写入脚本文件
             with open(temp_script_path, "w", encoding="utf-8") as f:
                 f.write(script_content)
-            
-            logger.info(f"临时脚本已创建: {temp_script_path}")
             
             # 执行脚本
             result = subprocess.run(
                 [sys.executable, str(temp_script_path)],
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5分钟超时
-                cwd=str(self.sandbox_path)  # 在沙盒目录中执行
+                timeout=300,
+                cwd=str(self.sandbox_path)
             )
             
-            # 解析输出（期望是JSON格式）
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             
             if result.returncode != 0:
-                logger.error(f"脚本执行失败，返回码: {result.returncode}")
-                logger.error(f"stderr: {stderr}")
-                logger.error(f"stdout: {stdout}")
-                
-                # 尝试从stdout解析JSON错误信息
-                try:
-                    import json
-                    error_result = json.loads(stdout)
-                    if error_result.get("success") == False:
-                        error_message = error_result.get("message", "脚本执行失败")
-                        # 如果错误消息是乱码或没有意义，使用更通用的消息
-                        if (not error_message or 
-                            len(error_message.strip()) < 3 or 
-                            "文件后的文本" in error_message or
-                            "名称文中结束的空错" in error_message or
-                            "大取同学名称" in error_message or  # 检测错误的文件名
-                            "连排" in error_message or  # 检测错误的输出文件名
-                            "求正放接探底作品" in error_message or  # 检测错误的文件名
-                            "输克" in error_message or  # 检测错误的输出文件名
-                            "文章不能为空" in error_message or  # 文件不存在时的错误消息（不准确）
-                            "文章输光" in error_message or  # 乱码
-                            "文章保存不能" in error_message or  # 乱码
-                            error_message.count("，") > 10 or  # 包含大量逗号可能是乱码
-                            not any(c.isalnum() or c in "，。！？：；" for c in error_message[:50])  # 前50个字符中没有正常字符
-                        ):
-                            # 根据stderr判断具体错误类型
-                            if stderr and ("FileNotFoundError" in stderr or "文件不存在" in stderr or "No such file" in stderr):
-                                error_message = "脚本执行失败：文件不存在或文件路径错误"
-                            elif stderr and ("PermissionError" in stderr or "权限" in stderr):
-                                error_message = "脚本执行失败：文件权限不足"
-                            else:
-                                error_message = "脚本执行失败：文件路径错误或文件不存在"
-                        return {
-                            "success": False,
-                            "message": error_message,
-                            "data": error_result.get("data"),
-                            "error": error_result.get("error", stderr)
-                        }
-                except:
-                    pass
-                
-                # 构建详细的错误信息
-                error_msg = f"脚本执行失败（返回码: {result.returncode}）"
-                if stderr:
-                    error_msg += f"\n错误输出: {stderr[:500]}"  # 限制长度，避免过长
-                if stdout and not stderr:
-                    error_msg += f"\n输出: {stdout[:500]}"
-                
                 return {
                     "success": False,
-                    "message": error_msg,
+                    "message": f"脚本执行失败: {stderr or stdout}",
                     "data": None,
-                    "error": stderr or stdout or "未知错误"
+                    "error": stderr or stdout
                 }
             
-            # 尝试解析JSON输出
+            # 尝试解析 JSON 输出
             try:
                 import json
                 script_result = json.loads(stdout)
-                
-                # 验证结果格式
-                if not isinstance(script_result, dict):
-                    raise ValueError("脚本输出不是JSON对象")
-                
                 return {
                     "success": script_result.get("success", True),
                     "message": script_result.get("message", "脚本执行完成"),
-                    "data": script_result.get("data"),
-                    "error": script_result.get("error")
+                    "data": script_result.get("data")
                 }
-            except json.JSONDecodeError as e:
-                # 如果输出不是JSON，返回原始输出
-                logger.warning(f"脚本输出不是有效的JSON: {e}")
-                logger.debug(f"原始输出: {stdout}")
+            except json.JSONDecodeError:
+                return {
+                    "success": True,
+                    "message": "脚本执行完成",
+                    "data": {"output": stdout}
+                }
+                
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "message": "脚本执行超时",
+                "error": "Timeout"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"执行脚本失败: {str(e)}",
+                "error": str(e)
+            }
+    # ========== 系统控制功能 ==========
+    
+    def _set_volume(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        设置系统音量
+        
+        Args:
+            params: 包含 level (0-100) 或 action (mute/unmute/up/down)
+        """
+        level = params.get("level")
+        action = params.get("action")
+        
+        try:
+            if sys.platform == "darwin":
+                if action == "mute":
+                    subprocess.run(["osascript", "-e", "set volume with output muted"], check=True)
+                    return {"success": True, "message": "已静音", "data": {"muted": True}}
+                elif action == "unmute":
+                    subprocess.run(["osascript", "-e", "set volume without output muted"], check=True)
+                    return {"success": True, "message": "已取消静音", "data": {"muted": False}}
+                elif action == "up":
+                    subprocess.run(["osascript", "-e", "set volume output volume ((output volume of (get volume settings)) + 10)"], check=True)
+                    return {"success": True, "message": "音量已增加", "data": {}}
+                elif action == "down":
+                    subprocess.run(["osascript", "-e", "set volume output volume ((output volume of (get volume settings)) - 10)"], check=True)
+                    return {"success": True, "message": "音量已降低", "data": {}}
+                elif level is not None:
+                    level = max(0, min(100, int(level)))
+                    subprocess.run(["osascript", "-e", f"set volume output volume {level}"], check=True)
+                    return {"success": True, "message": "音量已设置为 " + str(level), "data": {"level": level}}
+                else:
+                    # 获取当前音量
+                    result = subprocess.run(["osascript", "-e", "output volume of (get volume settings)"], capture_output=True, text=True)
+                    current = result.stdout.strip()
+                    return {"success": True, "message": "当前音量: " + current, "data": {"level": int(current) if current.isdigit() else 0}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "设置音量失败: " + str(e), "data": None}
+    
+    def _set_brightness(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        设置屏幕亮度 (仅 macOS)
+        
+        Args:
+            params: 包含 level (0.0-1.0) 或 action ("up"/"down"/"max"/"min")
+        """
+        level = params.get("level")
+        action = params.get("action")
+        
+        try:
+            if sys.platform == "darwin":
+                # 方法1：使用 brightness 命令行工具
+                try:
+                    if action == "max" or level == 1.0 or level == 1:
+                        result = subprocess.run(["brightness", "1"], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return {"success": True, "message": "亮度已调到最亮", "data": {"level": 1.0}}
+                    elif action == "min" or level == 0.0 or level == 0:
+                        result = subprocess.run(["brightness", "0"], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return {"success": True, "message": "亮度已调到最暗", "data": {"level": 0.0}}
+                    elif level is not None:
+                        level = max(0.0, min(1.0, float(level)))
+                        result = subprocess.run(["brightness", str(level)], capture_output=True, text=True)
+                        if result.returncode == 0:
+                            return {"success": True, "message": "亮度已设置为 " + str(int(level * 100)) + "%", "data": {"level": level}}
+                except FileNotFoundError:
+                    pass  # brightness 工具未安装，尝试备选方案
+                
+                # 方法2：使用键盘快捷键模拟（通过 F1/F2 键）
+                if action == "up":
+                    # 模拟按下亮度增加键
+                    subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 144'], check=True)
+                    return {"success": True, "message": "亮度已增加", "data": {}}
+                elif action == "down":
+                    # 模拟按下亮度降低键
+                    subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 145'], check=True)
+                    return {"success": True, "message": "亮度已降低", "data": {}}
+                elif action == "max" or level == 1.0 or level == 1:
+                    # 连续按亮度增加键
+                    for _ in range(16):
+                        subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 144'], capture_output=True)
+                        time.sleep(0.05)
+                    return {"success": True, "message": "亮度已调到最亮", "data": {"level": 1.0}}
+                elif action == "min" or level == 0.0 or level == 0:
+                    # 连续按亮度降低键
+                    for _ in range(16):
+                        subprocess.run(["osascript", "-e", 'tell application "System Events" to key code 145'], capture_output=True)
+                        time.sleep(0.05)
+                    return {"success": True, "message": "亮度已调到最暗", "data": {"level": 0.0}}
+                else:
+                    return {"success": False, "message": "请指定亮度级别 (0-1) 或操作 (up/down/max/min)。建议安装 brightness 工具: brew install brightness", "data": None}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "设置亮度失败: " + str(e), "data": None}
+    
+    def _send_notification(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        发送系统通知
+        
+        Args:
+            params: 包含 title, message, subtitle (可选), sound (可选)
+        """
+        title = params.get("title", "DeskJarvis")
+        message = params.get("message", "")
+        subtitle = params.get("subtitle", "")
+        sound = params.get("sound", True)
+        
+        try:
+            if sys.platform == "darwin":
+                script = f'display notification "{message}"'
+                if title:
+                    script += f' with title "{title}"'
+                if subtitle:
+                    script += f' subtitle "{subtitle}"'
+                if sound:
+                    script += ' sound name "default"'
+                
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "通知已发送", "data": {"title": title, "message": message}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "发送通知失败: " + str(e), "data": None}
+    
+    def _clipboard_read(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        读取剪贴板内容
+        """
+        try:
+            if sys.platform == "darwin":
+                result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+                content = result.stdout
+                return {"success": True, "message": "已读取剪贴板", "data": {"content": content}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "读取剪贴板失败: " + str(e), "data": None}
+    
+    def _clipboard_write(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        写入剪贴板
+        
+        Args:
+            params: 包含 content (要复制的文本)
+        """
+        content = params.get("content", "")
+        
+        try:
+            if sys.platform == "darwin":
+                process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                process.communicate(content.encode("utf-8"))
+                return {"success": True, "message": "已复制到剪贴板", "data": {"content": content[:50] + "..." if len(content) > 50 else content}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "写入剪贴板失败: " + str(e), "data": None}
+    
+    def _keyboard_type(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        模拟键盘输入
+        
+        Args:
+            params: 包含 text (要输入的文本)
+        """
+        text = params.get("text", "")
+        
+        try:
+            if sys.platform == "darwin":
+                # 使用 osascript 模拟键盘输入
+                escaped_text = text.replace('"', '\\"').replace("'", "\\'")
+                script = f'tell application "System Events" to keystroke "{escaped_text}"'
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "已输入文本", "data": {"text": text[:30] + "..." if len(text) > 30 else text}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "键盘输入失败: " + str(e), "data": None}
+    
+    def _keyboard_shortcut(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        发送键盘快捷键
+        
+        Args:
+            params: 包含 keys (如 "command+c", "command+shift+s")
+        """
+        keys = params.get("keys", "")
+        
+        try:
+            if sys.platform == "darwin":
+                # 解析快捷键
+                parts = keys.lower().split("+")
+                modifiers = []
+                key = parts[-1] if parts else ""
+                
+                for part in parts[:-1]:
+                    if part in ["cmd", "command"]:
+                        modifiers.append("command down")
+                    elif part in ["ctrl", "control"]:
+                        modifiers.append("control down")
+                    elif part in ["alt", "option"]:
+                        modifiers.append("option down")
+                    elif part in ["shift"]:
+                        modifiers.append("shift down")
+                
+                modifier_str = ", ".join(modifiers) if modifiers else ""
+                
+                if modifier_str:
+                    script = f'tell application "System Events" to keystroke "{key}" using {{{modifier_str}}}'
+                else:
+                    script = f'tell application "System Events" to keystroke "{key}"'
+                
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "已发送快捷键: " + keys, "data": {"keys": keys}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "发送快捷键失败: " + str(e), "data": None}
+    
+    def _mouse_click(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        模拟鼠标点击
+        
+        Args:
+            params: 包含 x, y (屏幕坐标), button (left/right), clicks (点击次数)
+        """
+        x = params.get("x", 0)
+        y = params.get("y", 0)
+        button = params.get("button", "left")
+        clicks = params.get("clicks", 1)
+        
+        try:
+            if sys.platform == "darwin":
+                # 使用 cliclick 工具（需要安装：brew install cliclick）
+                click_cmd = "c" if button == "left" else "rc"
+                if clicks == 2:
+                    click_cmd = "dc"  # double click
+                
+                result = subprocess.run(["cliclick", f"{click_cmd}:{x},{y}"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return {"success": True, "message": "已点击坐标 (" + str(x) + ", " + str(y) + ")", "data": {"x": x, "y": y}}
+                else:
+                    return {"success": False, "message": "鼠标点击失败，请安装 cliclick: brew install cliclick", "data": None}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except FileNotFoundError:
+            return {"success": False, "message": "请先安装 cliclick: brew install cliclick", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "鼠标点击失败: " + str(e), "data": None}
+    
+    def _mouse_move(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        移动鼠标
+        
+        Args:
+            params: 包含 x, y (屏幕坐标)
+        """
+        x = params.get("x", 0)
+        y = params.get("y", 0)
+        
+        try:
+            if sys.platform == "darwin":
+                result = subprocess.run(["cliclick", f"m:{x},{y}"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return {"success": True, "message": "已移动鼠标到 (" + str(x) + ", " + str(y) + ")", "data": {"x": x, "y": y}}
+                else:
+                    return {"success": False, "message": "鼠标移动失败，请安装 cliclick: brew install cliclick", "data": None}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except FileNotFoundError:
+            return {"success": False, "message": "请先安装 cliclick: brew install cliclick", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "鼠标移动失败: " + str(e), "data": None}
+    
+    def _window_minimize(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        最小化窗口
+        
+        Args:
+            params: 包含 app_name (应用名称，可选，默认当前窗口)
+        """
+        app_name = params.get("app_name")
+        
+        try:
+            if sys.platform == "darwin":
+                if app_name:
+                    script = f'tell application "{app_name}" to set miniaturized of window 1 to true'
+                else:
+                    script = 'tell application "System Events" to set miniaturized of window 1 of (first process whose frontmost is true) to true'
+                
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "已最小化窗口", "data": {"app": app_name or "当前窗口"}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "最小化窗口失败: " + str(e), "data": None}
+    
+    def _window_maximize(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        最大化窗口
+        
+        Args:
+            params: 包含 app_name (应用名称，可选，默认当前窗口)
+        """
+        app_name = params.get("app_name")
+        
+        try:
+            if sys.platform == "darwin":
+                if app_name:
+                    script = f'''
+                    tell application "{app_name}"
+                        activate
+                        tell application "System Events"
+                            keystroke "f" using {{control down, command down}}
+                        end tell
+                    end tell
+                    '''
+                else:
+                    script = 'tell application "System Events" to keystroke "f" using {control down, command down}'
+                
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "已最大化窗口", "data": {"app": app_name or "当前窗口"}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "最大化窗口失败: " + str(e), "data": None}
+    
+    def _window_close(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        关闭窗口
+        
+        Args:
+            params: 包含 app_name (应用名称，可选，默认当前窗口)
+        """
+        app_name = params.get("app_name")
+        
+        try:
+            if sys.platform == "darwin":
+                if app_name:
+                    script = f'tell application "{app_name}" to close window 1'
+                else:
+                    script = 'tell application "System Events" to keystroke "w" using command down'
+                
+                subprocess.run(["osascript", "-e", script], check=True)
+                return {"success": True, "message": "已关闭窗口", "data": {"app": app_name or "当前窗口"}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "关闭窗口失败: " + str(e), "data": None}
+    
+    def _speak(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        语音播报
+        
+        Args:
+            params: 包含 text (要播报的文本), voice (声音名称，可选)
+        """
+        text = params.get("text", "")
+        voice = params.get("voice")
+        
+        try:
+            if sys.platform == "darwin":
+                cmd = ["say"]
+                if voice:
+                    cmd.extend(["-v", voice])
+                cmd.append(text)
+                
+                subprocess.run(cmd, check=True)
+                return {"success": True, "message": "已播报", "data": {"text": text[:30] + "..." if len(text) > 30 else text}}
+            else:
+                return {"success": False, "message": "此功能仅支持 macOS", "data": None}
+        except Exception as e:
+            return {"success": False, "message": "语音播报失败: " + str(e), "data": None}
+    
+    # ========== 系统信息查询 ==========
+    
+    def _get_system_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        获取系统信息
+        
+        Args:
+            params: 包含 info_type (信息类型: battery/disk/memory/cpu/network/apps)
+        """
+        info_type = params.get("info_type", "all")
+        
+        try:
+            result_data = {}
+            
+            if info_type in ["battery", "all"]:
+                # 获取电池信息
+                if sys.platform == "darwin":
+                    battery_result = subprocess.run(
+                        ["pmset", "-g", "batt"],
+                        capture_output=True, text=True
+                    )
+                    if battery_result.returncode == 0:
+                        output = battery_result.stdout
+                        # 解析电池百分比
+                        import re
+                        match = re.search(r'(\d+)%', output)
+                        if match:
+                            result_data["battery"] = {
+                                "percentage": int(match.group(1)),
+                                "charging": "charging" in output.lower() or "ac power" in output.lower()
+                            }
+            
+            if info_type in ["disk", "all"]:
+                # 获取磁盘信息
+                disk_result = subprocess.run(
+                    ["df", "-h", "/"],
+                    capture_output=True, text=True
+                )
+                if disk_result.returncode == 0:
+                    lines = disk_result.stdout.strip().split("\n")
+                    if len(lines) > 1:
+                        parts = lines[1].split()
+                        if len(parts) >= 5:
+                            result_data["disk"] = {
+                                "total": parts[1],
+                                "used": parts[2],
+                                "available": parts[3],
+                                "use_percent": parts[4]
+                            }
+            
+            if info_type in ["memory", "all"]:
+                # 获取内存信息
+                if sys.platform == "darwin":
+                    mem_result = subprocess.run(
+                        ["vm_stat"],
+                        capture_output=True, text=True
+                    )
+                    if mem_result.returncode == 0:
+                        # 简化内存信息
+                        result_data["memory"] = {"info": "macOS 内存使用正常"}
+            
+            if info_type in ["apps", "all"]:
+                # 获取运行中的应用
+                if sys.platform == "darwin":
+                    apps_result = subprocess.run(
+                        ["osascript", "-e", 'tell application "System Events" to get name of every process whose background only is false'],
+                        capture_output=True, text=True
+                    )
+                    if apps_result.returncode == 0:
+                        apps = [app.strip() for app in apps_result.stdout.split(",")]
+                        result_data["running_apps"] = apps[:20]  # 最多显示20个
+            
+            if info_type in ["network", "all"]:
+                # 获取网络信息
+                if sys.platform == "darwin":
+                    # 获取 IP
+                    ip_result = subprocess.run(
+                        ["ipconfig", "getifaddr", "en0"],
+                        capture_output=True, text=True
+                    )
+                    if ip_result.returncode == 0:
+                        result_data["network"] = {
+                            "local_ip": ip_result.stdout.strip()
+                        }
+            
+            # 构建消息
+            message_parts = []
+            report_lines = ["# 系统信息报告", ""]
+            report_lines.append("生成时间: " + time.strftime("%Y-%m-%d %H:%M:%S"))
+            report_lines.append("")
+            
+            if "battery" in result_data:
+                b = result_data["battery"]
+                status = "充电中" if b["charging"] else "使用电池"
+                message_parts.append("电池: " + str(b["percentage"]) + "% (" + status + ")")
+                report_lines.append("## 电池状态")
+                report_lines.append("- 电量: " + str(b["percentage"]) + "%")
+                report_lines.append("- 状态: " + status)
+                report_lines.append("")
+            
+            if "disk" in result_data:
+                d = result_data["disk"]
+                message_parts.append("磁盘: 已用 " + d["used"] + " / 总共 " + d["total"] + " (" + d["use_percent"] + ")")
+                report_lines.append("## 磁盘空间")
+                report_lines.append("- 总容量: " + d["total"])
+                report_lines.append("- 已使用: " + d["used"])
+                report_lines.append("- 可用: " + d["available"])
+                report_lines.append("- 使用率: " + d["use_percent"])
+                report_lines.append("")
+            
+            if "memory" in result_data:
+                report_lines.append("## 内存状态")
+                report_lines.append("- 状态: " + result_data["memory"].get("info", "正常"))
+                report_lines.append("")
+            
+            if "running_apps" in result_data:
+                apps = result_data["running_apps"]
+                message_parts.append("运行中应用: " + str(len(apps)) + " 个")
+                report_lines.append("## 运行中的应用 (" + str(len(apps)) + " 个)")
+                for app in apps:
+                    report_lines.append("- " + app)
+                report_lines.append("")
+            
+            if "network" in result_data:
+                n = result_data["network"]
+                message_parts.append("本机IP: " + n.get("local_ip", "未知"))
+                report_lines.append("## 网络信息")
+                report_lines.append("- 本机IP: " + n.get("local_ip", "未知"))
+                report_lines.append("")
+            
+            message = "; ".join(message_parts) if message_parts else "系统信息获取完成"
+            
+            # 如果指定了保存路径，保存报告
+            save_path = params.get("save_path", "")
+            if save_path:
+                import os
+                if save_path.startswith("~"):
+                    save_path = os.path.expanduser(save_path)
+                
+                # 确保目录存在
+                save_dir = os.path.dirname(save_path)
+                if save_dir:
+                    os.makedirs(save_dir, exist_ok=True)
+                
+                report_content = "\n".join(report_lines)
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(report_content)
+                
+                message = message + "，报告已保存到: " + save_path
+                result_data["saved_path"] = save_path
+            
+            return {"success": True, "message": message, "data": result_data}
+        except Exception as e:
+            return {"success": False, "message": "获取系统信息失败: " + str(e), "data": None}
+    
+    # ========== 图片处理 ==========
+    
+    def _image_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        图片处理
+        
+        Args:
+            params: 包含 
+                - image_path: 图片路径
+                - action: 操作类型 (compress/resize/convert/info)
+                - width: 目标宽度 (resize时使用)
+                - height: 目标高度 (resize时使用)
+                - format: 目标格式 (convert时使用，如 jpg/png/webp)
+                - quality: 压缩质量 (compress时使用，1-100)
+        """
+        image_path = params.get("image_path", "")
+        action = params.get("action", "info")
+        
+        try:
+            from PIL import Image
+            import os
+            
+            # 解析路径
+            if image_path.startswith("~"):
+                image_path = os.path.expanduser(image_path)
+            
+            if not os.path.exists(image_path):
+                return {"success": False, "message": "图片不存在: " + image_path, "data": None}
+            
+            img = Image.open(image_path)
+            original_size = os.path.getsize(image_path)
+            
+            if action == "info":
+                # 获取图片信息
+                return {
+                    "success": True,
+                    "message": "图片: " + str(img.width) + "x" + str(img.height) + ", " + img.format + ", " + self._format_size(original_size),
+                    "data": {
+                        "width": img.width,
+                        "height": img.height,
+                        "format": img.format,
+                        "mode": img.mode,
+                        "size_bytes": original_size
+                    }
+                }
+            
+            elif action == "compress":
+                quality = params.get("quality", 80)
+                output_path = self._get_output_path(image_path, "_compressed")
+                
+                # 转换为 RGB 如果需要
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                
+                img.save(output_path, "JPEG", quality=quality, optimize=True)
+                new_size = os.path.getsize(output_path)
                 
                 return {
                     "success": True,
-                    "message": "脚本执行完成（输出不是JSON格式）",
-                    "data": {"output": stdout, "stderr": stderr}
+                    "message": "已压缩图片，从 " + self._format_size(original_size) + " 到 " + self._format_size(new_size),
+                    "data": {"path": output_path, "original_size": original_size, "new_size": new_size}
                 }
             
-        except subprocess.TimeoutExpired:
-            logger.error("脚本执行超时（超过5分钟）")
-            return {
-                "success": False,
-                "message": "脚本执行超时（超过5分钟）",
-                "data": None,
-                "error": "超时"
-            }
+            elif action == "resize":
+                width = params.get("width")
+                height = params.get("height")
+                
+                if width and not height:
+                    ratio = width / img.width
+                    height = int(img.height * ratio)
+                elif height and not width:
+                    ratio = height / img.height
+                    width = int(img.width * ratio)
+                elif not width and not height:
+                    return {"success": False, "message": "请指定宽度或高度", "data": None}
+                
+                output_path = self._get_output_path(image_path, "_resized")
+                resized = img.resize((int(width), int(height)), Image.Resampling.LANCZOS)
+                resized.save(output_path)
+                
+                return {
+                    "success": True,
+                    "message": "已调整图片大小为 " + str(width) + "x" + str(height),
+                    "data": {"path": output_path, "width": width, "height": height}
+                }
+            
+            elif action == "convert":
+                target_format = params.get("format", "jpg").lower()
+                format_map = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG", "webp": "WEBP", "gif": "GIF"}
+                
+                if target_format not in format_map:
+                    return {"success": False, "message": "不支持的格式: " + target_format, "data": None}
+                
+                # 修改扩展名
+                base = os.path.splitext(image_path)[0]
+                output_path = base + "." + target_format
+                
+                # 转换模式
+                if target_format in ["jpg", "jpeg"] and img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                
+                img.save(output_path, format_map[target_format])
+                
+                return {
+                    "success": True,
+                    "message": "已转换为 " + target_format.upper() + " 格式",
+                    "data": {"path": output_path}
+                }
+            
+            else:
+                return {"success": False, "message": "未知的操作: " + action, "data": None}
+                
+        except ImportError:
+            return {"success": False, "message": "需要安装 Pillow 库: pip install Pillow", "data": None}
         except Exception as e:
-            logger.error(f"执行脚本失败: {e}", exc_info=True)
-            return {
-                "success": False,
-                "message": f"执行脚本失败: {e}",
-                "data": None,
-                "error": str(e)
+            return {"success": False, "message": "图片处理失败: " + str(e), "data": None}
+    
+    def _get_output_path(self, original_path: str, suffix: str) -> str:
+        """生成输出路径"""
+        import os
+        base, ext = os.path.splitext(original_path)
+        return base + suffix + ext
+    
+    def _format_size(self, size_bytes: int) -> str:
+        """格式化文件大小"""
+        if size_bytes < 1024:
+            return str(size_bytes) + " B"
+        elif size_bytes < 1024 * 1024:
+            return str(round(size_bytes / 1024, 1)) + " KB"
+        else:
+            return str(round(size_bytes / (1024 * 1024), 1)) + " MB"
+    
+    # ========== 定时提醒 ==========
+    
+    def _set_reminder(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        设置提醒
+        
+        Args:
+            params: 包含
+                - message: 提醒内容
+                - delay: 延迟时间（如 "5分钟", "1小时"）
+                - repeat: 重复类型 (可选: daily/hourly/weekly)
+        """
+        from agent.scheduler import get_scheduler, parse_time_expression
+        
+        message = params.get("message", "提醒时间到了")
+        delay_expr = params.get("delay", "")
+        repeat = params.get("repeat")
+        
+        if not delay_expr:
+            return {"success": False, "message": "请指定延迟时间，如 '5分钟后'", "data": None}
+        
+        delay_seconds = parse_time_expression(delay_expr)
+        if not delay_seconds:
+            return {"success": False, "message": "无法解析时间: " + delay_expr, "data": None}
+        
+        scheduler = get_scheduler()
+        return scheduler.add_reminder(message=message, delay_seconds=delay_seconds, repeat=repeat)
+    
+    def _list_reminders(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """列出所有提醒"""
+        from agent.scheduler import get_scheduler
+        scheduler = get_scheduler()
+        return scheduler.list_reminders()
+    
+    def _cancel_reminder(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """取消提醒"""
+        from agent.scheduler import get_scheduler
+        reminder_id = params.get("reminder_id", "")
+        if not reminder_id:
+            return {"success": False, "message": "请指定提醒ID", "data": None}
+        scheduler = get_scheduler()
+        return scheduler.cancel_reminder(reminder_id)
+    
+    # ========== 工作流管理 ==========
+    
+    def _create_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """创建工作流"""
+        from agent.workflows import get_workflow_manager
+        name = params.get("name", "")
+        commands = params.get("commands", [])
+        description = params.get("description", "")
+        return get_workflow_manager().add_workflow(name, commands, description)
+    
+    def _list_workflows(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """列出工作流"""
+        from agent.workflows import get_workflow_manager
+        return get_workflow_manager().list_workflows()
+    
+    def _delete_workflow(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """删除工作流"""
+        from agent.workflows import get_workflow_manager
+        name = params.get("name", "")
+        return get_workflow_manager().delete_workflow(name)
+    
+    # ========== 任务历史 ==========
+    
+    def _get_task_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """获取任务历史"""
+        from agent.history import get_task_history
+        limit = params.get("limit", 20)
+        return get_task_history().get_recent_tasks(limit)
+    
+    def _search_history(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """搜索历史"""
+        from agent.history import get_task_history
+        keyword = params.get("keyword", "")
+        return get_task_history().search_history(keyword)
+    
+    def _add_favorite(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """添加收藏"""
+        from agent.history import get_task_history
+        instruction = params.get("instruction", "")
+        name = params.get("name")
+        return get_task_history().add_favorite(instruction, name)
+    
+    def _list_favorites(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """列出收藏"""
+        from agent.history import get_task_history
+        return get_task_history().list_favorites()
+    
+    def _remove_favorite(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """移除收藏"""
+        from agent.history import get_task_history
+        favorite_id = params.get("favorite_id", "")
+        return get_task_history().remove_favorite(favorite_id)
+    
+    # ========== 文本AI处理 ==========
+    
+    def _text_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        文本AI处理（翻译、总结、润色等）
+        
+        Args:
+            params: 包含
+                - text: 要处理的文本
+                - action: 操作类型 (translate/summarize/polish/expand/fix_grammar)
+                - target_lang: 目标语言（翻译时使用，如 "英文"、"日文"）
+        """
+        text = params.get("text", "")
+        action = params.get("action", "")
+        target_lang = params.get("target_lang", "英文")
+        
+        if not text:
+            return {"success": False, "message": "请提供要处理的文本", "data": None}
+        
+        # 构建处理提示
+        prompts = {
+            "translate": f"请将以下文本翻译成{target_lang}，只输出翻译结果，不要有其他内容：\n\n{text}",
+            "summarize": f"请总结以下文本的主要内容，简洁明了：\n\n{text}",
+            "polish": f"请润色以下文本，使其更加通顺优美：\n\n{text}",
+            "expand": f"请扩写以下文本，添加更多细节：\n\n{text}",
+            "fix_grammar": f"请修正以下文本中的语法和拼写错误：\n\n{text}"
+        }
+        
+        if action not in prompts:
+            return {"success": False, "message": "未知的操作: " + action + "，支持: translate/summarize/polish/expand/fix_grammar", "data": None}
+        
+        try:
+            # 使用配置的 AI 进行处理
+            from agent.tools.config import Config
+            import os
+            
+            config = Config()
+            provider = config.provider
+            
+            if provider == "anthropic":
+                import anthropic
+                client = anthropic.Anthropic(api_key=config.api_key)
+                response = client.messages.create(
+                    model=config.model,
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": prompts[action]}]
+                )
+                result_text = response.content[0].text
+            elif provider == "deepseek":
+                import openai
+                client = openai.OpenAI(
+                    api_key=config.api_key,
+                    base_url="https://api.deepseek.com/v1"
+                )
+                response = client.chat.completions.create(
+                    model=config.model,
+                    messages=[{"role": "user", "content": prompts[action]}],
+                    max_tokens=2000
+                )
+                result_text = response.choices[0].message.content
+            else:
+                return {"success": False, "message": "不支持的AI提供商: " + provider, "data": None}
+            
+            action_names = {
+                "translate": "翻译",
+                "summarize": "总结", 
+                "polish": "润色",
+                "expand": "扩写",
+                "fix_grammar": "语法修正"
             }
-        finally:
-            # 清理临时脚本文件（可选，保留用于调试）
-            # if temp_script_path.exists():
-            #     temp_script_path.unlink()
-            pass
+            
+            return {
+                "success": True,
+                "message": action_names.get(action, action) + "完成",
+                "data": {"result": result_text, "action": action}
+            }
+            
+        except Exception as e:
+            return {"success": False, "message": "文本处理失败: " + str(e), "data": None}

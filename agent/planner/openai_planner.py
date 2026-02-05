@@ -169,7 +169,7 @@ class OpenAIPlanner(BasePlanner):
 - file_write: 写入文件内容（支持覆盖/追加模式）
 - file_create: 创建新文件
 - file_rename: 重命名文件
-- file_move: 移动文件（可移动到回收站）
+- file_move: 移动文件（可移动到回收站）。target_dir 参数支持完整路径（如 "~/Desktop/文件夹名"）或文件夹名（如 "8888"），系统会自动智能搜索文件夹。
 - file_copy: 复制文件
 - file_batch_rename: 批量重命名文件夹内的文件
 - file_batch_copy: 批量复制文件夹内的文件

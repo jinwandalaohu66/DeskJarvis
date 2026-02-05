@@ -15,6 +15,113 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* 统一动画时长变量 */
+  --animation-fast: 0.15s;
+  --animation-normal: 0.25s;
+  --animation-slow: 0.35s;
+  
+  /* 统一缓动函数 */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-in-out-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 启用 GPU 加速 */
+.gpu-accelerated {
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  will-change: transform, opacity;
+}
+
+/* 优化按钮动画 - 更快的 transition */
+button, [role="button"] {
+  transition: transform var(--animation-fast) var(--ease-out-expo),
+              background-color var(--animation-fast) var(--ease-in-out-smooth),
+              box-shadow var(--animation-fast) var(--ease-in-out-smooth),
+              opacity var(--animation-fast) var(--ease-in-out-smooth) !important;
+}
+
+button:active:not(:disabled), [role="button"]:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* 优化 hover 动画 */
+.transition-colors {
+  transition-duration: var(--animation-fast) !important;
+  transition-timing-function: var(--ease-in-out-smooth) !important;
+}
+
+.transition-all {
+  transition-duration: var(--animation-fast) !important;
+  transition-timing-function: var(--ease-in-out-smooth) !important;
+}
+
+/* 优化 spinner 动画 */
+@keyframes spin-smooth {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin-smooth 0.8s linear infinite !important;
+}
+
+/* 优化滚动条 - 自动隐藏效果 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0);
+  border-radius: 3px;
+  transition: background 0.3s ease;
+}
+
+/* 鼠标悬停在容器上时显示滚动条 */
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}
+
+/* 正在滚动时显示滚动条 */
+*::-webkit-scrollbar-thumb:active {
+  background: rgba(128, 128, 128, 0.5);
+}
+
+/* 暗色模式滚动条 */
+.dark *:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.dark *:hover::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* 自动隐藏滚动条的容器 */
+.scrollbar-auto-hide {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.scrollbar-auto-hide:hover {
+  scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+.dark .scrollbar-auto-hide:hover {
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 
 body {

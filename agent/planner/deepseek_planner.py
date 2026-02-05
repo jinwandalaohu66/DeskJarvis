@@ -132,6 +132,22 @@ class DeepSeekPlanner(BasePlanner):
             last_created_file = context.get("last_created_file")
             attached_path = context.get("attached_path")
             chat_history = context.get("chat_history", [])
+            memory_context = context.get("memory_context", "")
+            workflow_suggestion = context.get("workflow_suggestion")
+            
+            # 添加记忆上下文（优先级最高）
+            if memory_context:
+                context_info += "\n\n**记忆上下文**（AI对用户的了解）：\n"
+                context_info += memory_context + "\n"
+            
+            # 添加工作流建议
+            if workflow_suggestion:
+                context_info += "\n\n**工作流建议**：\n"
+                pattern = workflow_suggestion.get("pattern", {})
+                context_info += f"用户经常执行类似任务，建议使用之前成功的步骤模式：\n"
+                action_seq = pattern.get("action_sequence", [])
+                if action_seq:
+                    context_info += f"常用步骤序列：{' → '.join(action_seq)}\n"
             
             # 添加聊天历史
             if chat_history:
@@ -156,11 +172,16 @@ class DeepSeekPlanner(BasePlanner):
         
         prompt = f"""你是一个AI任务规划助手。请理解用户的自然语言指令，生成可执行的任务步骤。
 
+**最重要的规则（必须遵守！）**：
+- **调整亮度** → 必须用 `set_brightness` 工具，绝对不要用脚本！
+- **调整音量** → 必须用 `set_volume` 工具，绝对不要用脚本！
+- **发送通知** → 必须用 `send_notification` 工具，绝对不要用脚本！
+- **语音播报** → 必须用 `speak` 工具，绝对不要用脚本！
+- **剪贴板操作** → 必须用 `clipboard_read`/`clipboard_write` 工具！
+
 **核心原则**：
-- 理解用户的真实意图，而不是匹配关键词
-- 思考如何完成任务，而不是选择工具
-- 简单任务用工具，复杂任务用脚本
-- 以结果为导向，只要能达到目标，用什么方法都可以
+- 理解用户的真实意图
+- 优先使用已有工具，只有工具无法完成时才用脚本
 
 **你的能力**：
 1. **文件操作**：读取、写入、创建、删除、重命名、移动、复制文件
@@ -168,28 +189,76 @@ class DeepSeekPlanner(BasePlanner):
 3. **系统操作**：桌面截图、打开/关闭应用、打开文件/文件夹
 4. **脚本执行**：生成并执行Python脚本完成复杂任务
 
-**可用工具**（简单任务优先使用）：
-- file_read: 读取文件内容（支持.txt, .docx等）
-- file_write: 写入文件内容（支持覆盖/追加模式）
-- file_create: 创建新文件
-- file_rename: 重命名文件
-- file_move: 移动文件（可移动到回收站）
-- file_copy: 复制文件
-- file_batch_rename: 批量重命名文件夹内的文件
-- file_batch_copy: 批量复制文件夹内的文件
-- file_batch_organize: 批量整理文件（按关键词、类型、时间分类）
-- browser_navigate: 导航到网页URL
-- browser_click: 点击页面元素
-- browser_fill: 填写表单
-- browser_wait: 等待页面加载
-- browser_screenshot: 截图网页
-- download_file: 下载文件（通过点击下载链接）
-- screenshot_desktop: 截图整个桌面
-- open_file: 用默认应用打开文件（只在用户明确说"打开文件"时使用）
-- open_folder: 在文件管理器中打开文件夹（只在用户明确说"打开文件夹"时使用）
-- open_app: 打开应用程序
-- close_app: 关闭应用程序
-- execute_python_script: 执行Python脚本（用于复杂任务或工具无法满足的需求）
+**可用工具及必需参数**（只能使用以下工具，不能自创工具名！）：
+- file_read: 读取文件 → params: {{"file_path": "文件路径"}}
+- file_write: 写入文件 → params: {{"file_path": "文件路径", "content": "内容"}}
+- file_create: 创建文件 → params: {{"file_path": "文件路径", "content": "内容"}}
+- file_rename: 重命名文件 → params: {{"file_path": "原文件路径", "new_name": "新文件名"}}
+- file_move: 移动文件 → params: {{"file_path": "原路径", "destination": "目标路径"}}
+- file_copy: 复制文件 → params: {{"file_path": "原路径", "destination": "目标路径"}}
+- file_delete: 删除文件 → params: {{"file_path": "文件路径"}}
+- screenshot_desktop: 截图桌面 → params: {{"save_path": "保存路径（可选）"}}
+- open_file: 打开文件 → params: {{"file_path": "文件路径"}}
+- open_folder: 打开文件夹 → params: {{"folder_path": "文件夹路径"}}
+- open_app: 打开应用 → params: {{"app_name": "应用名"}}
+- close_app: 关闭应用 → params: {{"app_name": "应用名"}}
+- browser_navigate: 导航网页 → params: {{"url": "网址"}}
+- browser_click: 点击元素 → params: {{"selector": "选择器"}}
+- browser_fill: 填写表单 → params: {{"selector": "选择器", "value": "值"}}
+- browser_screenshot: 截图网页 → params: {{"save_path": "保存路径"}}
+- download_file: 下载文件 → params: {{"url": "下载链接", "save_path": "保存路径"}}
+- execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
+
+**登录和验证码工具**（遇到需要登录或验证码的网站时使用）：
+- request_login: 请求用户登录 → params: {{"site_name": "网站名", "username_selector": "用户名输入框选择器", "password_selector": "密码输入框选择器", "submit_selector": "提交按钮选择器（可选）"}}
+- request_captcha: 请求验证码 → params: {{"site_name": "网站名", "captcha_image_selector": "验证码图片选择器", "captcha_input_selector": "验证码输入框选择器"}}
+
+**系统控制工具**：
+- set_volume: 设置音量 → params: {{"level": 0-100}} 或 {{"action": "mute/unmute/up/down"}}
+- set_brightness: 设置屏幕亮度 → params: {{"level": 0.0-1.0}} 或 {{"action": "up/down/max/min"}}（优先使用此工具！）
+- send_notification: 发送通知 → params: {{"title": "标题", "message": "内容"}}
+- speak: 语音播报 → params: {{"text": "要播报的内容"}}
+- clipboard_read: 读取剪贴板 → params: {{}}
+- clipboard_write: 写入剪贴板 → params: {{"content": "内容"}}
+- keyboard_type: 键盘输入 → params: {{"text": "要输入的文本"}}
+- keyboard_shortcut: 快捷键 → params: {{"keys": "command+c"}}
+- mouse_click: 鼠标点击 → params: {{"x": 100, "y": 200}}
+- window_minimize: 最小化窗口 → params: {{"app_name": "应用名（可选）"}}
+- window_maximize: 最大化窗口 → params: {{"app_name": "应用名（可选）"}}
+
+**系统信息和图片处理**：
+- get_system_info: 获取系统信息 → params: {{"info_type": "battery/disk/memory/apps/network/all", "save_path": "~/Desktop/系统报告.md（可选，指定后自动保存）"}}
+  **重要：查询系统信息必须使用这个工具，不要自己写脚本！如果用户要求保存，直接在 save_path 中指定路径！**
+- image_process: 图片处理 → params: {{"image_path": "图片路径", "action": "compress/resize/convert/info", "width": 800, "height": 600, "format": "jpg/png/webp", "quality": 80}}
+
+**定时提醒**：
+- set_reminder: 设置提醒 → params: {{"message": "提醒内容", "delay": "5分钟/1小时/30秒", "repeat": "daily/hourly（可选）"}}
+- list_reminders: 列出提醒 → params: {{}}
+- cancel_reminder: 取消提醒 → params: {{"reminder_id": "提醒ID"}}
+
+**工作流管理**：
+- create_workflow: 创建工作流 → params: {{"name": "工作流名", "commands": ["命令1", "命令2"], "description": "描述"}}
+- list_workflows: 列出工作流 → params: {{}}
+- delete_workflow: 删除工作流 → params: {{"name": "工作流名"}}
+
+**任务历史**：
+- get_task_history: 获取历史 → params: {{"limit": 20}}
+- search_history: 搜索历史 → params: {{"keyword": "关键词"}}
+- add_favorite: 添加收藏 → params: {{"instruction": "指令内容", "name": "收藏名（可选）"}}
+- list_favorites: 列出收藏 → params: {{}}
+- remove_favorite: 移除收藏 → params: {{"favorite_id": "收藏ID"}}
+
+**文本AI处理**：
+- text_process: AI文本处理 → params: {{"text": "要处理的文本", "action": "translate/summarize/polish/expand/fix_grammar", "target_lang": "目标语言（翻译时使用）"}}
+
+**关键规则**：
+1. **Word文档(.docx)操作必须用 execute_python_script**，没有 replace_text_in_docx 工具！
+2. **批量文件操作必须用 execute_python_script**
+3. **不能自创工具名**，只能用上面列出的
+4. 如果任务无法用上面工具完成，就用 execute_python_script
+5. **音量控制必须用 set_volume 工具**，不要用脚本！
+6. **亮度控制必须用 set_brightness 工具**，不要用脚本！
+7. **系统通知必须用 send_notification 工具**，不要用脚本！
 
 **Python脚本执行**（复杂任务或工具无法满足时使用）：
 - script: Python代码，**必须使用 base64 编码**（避免JSON转义问题）
@@ -199,11 +268,14 @@ class DeepSeekPlanner(BasePlanner):
   * 安全：文件操作限制在用户主目录或沙盒目录（~/Desktop, ~/Downloads, ~/.deskjarvis/sandbox）
   * 禁止危险命令：rm -rf /, sudo, chmod 777 等
   * 必须使用 try-except 包裹可能失败的操作
-  * 输出格式：`print(json.dumps({{"success": True/False, "message": "...", "data": {{...}}}}))`
+  * 输出格式：`print(json.dumps({{"success": True 或 False, "message": "...", "data": {{...}}}}))`
   * Python布尔值：使用 `True`/`False`（首字母大写），不是 `true`/`false`
   * 浏览器操作：使用 `playwright.sync_api` 模块
   * 文件操作：使用 `os`, `shutil`, `pathlib` 模块
-  * **Word文档处理**：使用 `python-docx` 库，导入方式：`from docx import Document`（**不要使用** `import docxplr` 或其他库名）
+  * **Word文档处理（.docx）**：
+    - **必须使用 python-docx 库**：`from docx import Document`
+    - **绝对禁止用 open() 读取 .docx 文件**！.docx 是 ZIP 压缩包，不是文本文件，用 open() 会报 UnicodeDecodeError
+    - 正确方式：`doc = Document(file_path)` → 遍历 `doc.paragraphs` 和 `doc.tables`
   * **文件路径**：脚本中应该**直接使用文件路径**（硬编码），不要从环境变量读取。使用 `os.path.expanduser()` 或 `pathlib.Path.home()` 处理 `~` 符号。例如：`file_path = os.path.expanduser("~/Desktop/file.docx")`
   * **重要**：文件路径**不要进行 URL 编码**（不要使用 `urllib.parse.quote()` 或类似函数），直接使用原始的中文文件名。例如：`"~/Desktop/强制执行申请书.docx"` 而不是 `"~/Desktop/%E5%BC%BA%E5%88%B6%E6%89%A7%E8%A1%8C%E7%94%B3%E8%AF%B7%E4%B9%A6.docx"`
   * **文件名必须准确**：必须使用用户指令中提到的**完整准确的文件名**，不要随意更改、替换或编码文件名。
@@ -211,14 +283,27 @@ class DeepSeekPlanner(BasePlanner):
     - **示例1**：如果用户说"强制执行申请书.docx"，脚本中必须使用 `"强制执行申请书.docx"`，**绝对不要**改成 `"大取同学名称.docx"`、`"求正放接探底作品.docx"` 或其他任何名称。
     - **示例2**：如果用户说"总结.txt"，必须使用 `"总结.txt"`，**绝对不要**改成 `"连排.txt"`、`"输克.txt"` 或其他任何名称。
     - **检查方法**：生成脚本后，检查脚本中的文件名是否与用户指令中的文件名完全一致，如果不一致，必须修正。
-  * **Python语法**：
-    - f-string 的正确语法是 f\"...\" 或 f\"\"\"...\"\"\"（f 和引号之间不能有空格），**必须使用双引号**，不要写成 f'\"\"\" 或 f'\"...\"（单引号+双引号混用）
-    - **重要**：f-string 的三引号形式必须是 f\"\"\"...\"\"\"（双引号），**绝对不要**写成 f'\"\"\"（单引号+三引号），这会导致语法错误
-    - 多行字符串使用 f\"\"\"...\"\"\" 或 f\"...\" + \"\\n\"，确保引号正确闭合
-    - 字符串拼接使用 + 时要注意格式，确保引号匹配
-    - **重要**：所有字符串必须正确闭合，不要出现未闭合的引号。例如：summary = f\"\"\"[Document Summary]...\"\"\" 而不是 summary = f\"\"[Document Summary]... 或 summary = f'\"\"\"[Document Summary]...
-    - **错误消息必须简洁**：错误消息应该简短明了，如 \"文件不存在\" 或 \"文件路径错误\"，不要重复文本或生成超长字符串
-    - **字符串闭合检查**：每个字符串字面量（用引号包围的文本）都必须有开始和结束引号，确保引号数量匹配
+  * **Python语法（极其重要！！！）**：
+    - **绝对禁止 f-string**：不要用 f"xxx" 格式！
+    - **字符串拼接必须完整**：每个 + 两边都要有完整的字符串
+      正确: "成功删除 " + str(count) + " 个文件"
+      错误: "成功删除 " + str(count) " 个文件"  (缺少 +)
+      错误: "成功删除 " + str(count) + " 个文件  (缺少闭合引号)
+    - **生成脚本后务必检查**：
+      1. 每个引号都有配对
+      2. 每个括号都有配对
+      3. try 必须有 except
+      4. 字符串拼接的 + 号不能漏
+  * **Matplotlib 图表绑定用法**：
+    - 使用 `plt.pie()` 画饼图，使用 `plt.bar()` 画柱状图
+    - 饼图颜色使用列表：`colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']`
+    - **不要使用** `plt.cm.set3` 或 `plt.cm.Set3`，使用上面的颜色列表
+    - 中文显示：`plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']`
+    - 保存图表：`plt.savefig(路径, dpi=150, bbox_inches='tight', facecolor='white')`
+  * **文件名搜索（关键）**：
+    - 用户说的可能是部分文件名（如"强制执行申请书"可能指"强制执行申请书-张三.docx"）
+    - **先用 glob 或 os.listdir 搜索匹配的文件**，再进行操作
+    - **不要猜测完整文件名**，使用关键词搜索
   * **文件名准确性**：必须使用用户指令中提到的**准确文件名**，不要随意更改文件名。
 
 **路径格式**：
@@ -250,24 +335,101 @@ class DeepSeekPlanner(BasePlanner):
 - 如果使用 execute_python_script，script字段必须使用 base64 编码
 - JSON格式必须严格正确，可以被Python的json.loads()解析
 
-示例：
+示例（Word文档替换）：
 [
   {{
-    "type": "file_read",
-    "action": "读取文件",
-    "params": {{"file_path": "~/Desktop/test.txt"}},
-    "description": "读取桌面上的test.txt文件"
-  }},
-  {{
     "type": "execute_python_script",
-    "action": "处理文件内容",
+    "action": "替换Word文档中的文字",
     "params": {{
-      "script": "aW1wb3J0IGpzb24KcHJpbnQoanNvbi5kdW1wcyh7InN1Y2Nlc3MiOiBUcnVlLCAibWVzc2FnZSI6ICJjb21wbGV0ZSJ9KSk=",
-      "reason": "需要处理文件内容并生成总结",
-      "safety": "文件操作限制在用户主目录，使用try-except包裹"
+      "script": "aW1wb3J0IGpzb24KaW1wb3J0IG9zCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKdHJ5OgogICAgZnJvbSBkb2N4IGltcG9ydCBEb2N1bWVudApleGNlcHQgSW1wb3J0RXJyb3I6CiAgICBwcmludChqc29uLmR1bXBzKHsic3VjY2VzcyI6IEZhbHNlLCAibWVzc2FnZSI6ICLpnIDopoHlronoo4UgcHl0aG9uLWRvY3g6IHBpcCBpbnN0YWxsIHB5dGhvbi1kb2N4In0pKQogICAgZXhpdCgwKQoKIyDmkJzntKLmlofku7YKZGVza3RvcCA9IFBhdGguaG9tZSgpIC8gIkRlc2t0b3AiCmtleXdvcmQgPSAi5by65Yi25omn6KGMIgpvbGRfdGV4dCA9ICLlvKDmlofnpYQiCm5ld190ZXh0ID0gIuW8oOaXreaUvyIKCm1hdGNoZXMgPSBbZiBmb3IgZiBpbiBkZXNrdG9wLml0ZXJkaXIoKSBpZiBmLmlzX2ZpbGUoKSBhbmQga2V5d29yZCBpbiBmLm5hbWUgYW5kIGYuc3VmZml4ID09ICIuZG9jeCJdCgppZiBub3QgbWF0Y2hlczoKICAgIHByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogRmFsc2UsICJtZXNzYWdlIjogIuacquaJvuWIsOWMheWQqyciICsga2V5d29yZCArICIn55qEV29yZOaWh+ahoyJ9KSkKICAgIGV4aXQoMCkKCmZpbGVfcGF0aCA9IG1hdGNoZXNbMF0KZG9jID0gRG9jdW1lbnQoZmlsZV9wYXRoKQpjb3VudCA9IDAKCmZvciBwYXJhIGluIGRvYy5wYXJhZ3JhcGhzOgogICAgaWYgb2xkX3RleHQgaW4gcGFyYS50ZXh0OgogICAgICAgIHBhcmEudGV4dCA9IHBhcmEudGV4dC5yZXBsYWNlKG9sZF90ZXh0LCBuZXdfdGV4dCkKICAgICAgICBjb3VudCArPSAxCgpkb2Muc2F2ZShmaWxlX3BhdGgpCnByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogVHJ1ZSwgIm1lc3NhZ2UiOiAi5pu/5o2i5a6M5oiQ77yM5YWx5pu/5o2iICIgKyBzdHIoY291bnQpICsgIiDlpIQifSkpCg==",
+      "reason": "Word文档替换需要使用python-docx库",
+      "safety": "只操作桌面文件，使用try-except"
     }},
-    "description": "执行Python脚本处理文件内容"
+    "description": "搜索并替换Word文档中的文字"
   }}
-]"""
+]
+
+**关键**：script 字段必须是 base64 编码的完整 Python 代码！"""
         
         return prompt
+    
+    def _call_reflection_api(self, prompt: str) -> Dict[str, Any]:
+        """
+        调用DeepSeek API进行反思
+        
+        Args:
+            prompt: 反思提示词
+        
+        Returns:
+            包含分析和新计划的字典
+        """
+        logger.info("调用DeepSeek进行反思...")
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个任务反思专家。分析失败原因并给出新方案。只返回JSON，不要添加其他文字。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=4000
+            )
+            
+            content = response.choices[0].message.content
+            logger.debug(f"反思响应: {content[:500]}...")
+            
+            # 解析反思结果
+            return self._parse_reflection_response(content)
+            
+        except Exception as e:
+            logger.error(f"反思API调用失败: {e}")
+            raise PlannerError(f"反思失败: {e}")
+    
+    def _parse_reflection_response(self, content: str) -> Dict[str, Any]:
+        """
+        解析反思响应
+        
+        Args:
+            content: AI响应内容
+        
+        Returns:
+            解析后的反思结果
+        """
+        content = content.strip()
+        
+        # 移除markdown代码块
+        if content.startswith("```"):
+            lines = content.split("\n")
+            if len(lines) > 2:
+                content = "\n".join(lines[1:-1])
+        
+        # 尝试提取JSON对象
+        start_idx = content.find('{')
+        end_idx = content.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            content = content[start_idx:end_idx + 1]
+        
+        try:
+            result = json.loads(content)
+            
+            # 验证格式
+            if "analysis" not in result:
+                result["analysis"] = "无分析"
+            if "new_plan" not in result:
+                result["new_plan"] = []
+            
+            # 验证 new_plan 是列表
+            if not isinstance(result["new_plan"], list):
+                result["new_plan"] = []
+            
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"解析反思响应失败: {e}")
+            logger.debug(f"响应内容: {content[:500]}")
+            return {
+                "analysis": f"解析失败: {e}",
+                "new_plan": []
+            }

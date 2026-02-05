@@ -67,6 +67,121 @@ class BasePlanner(ABC):
         """
         pass
     
+    def reflect(
+        self,
+        instruction: str,
+        last_plan: List[Dict[str, Any]],
+        error: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        反思失败并重新规划
+        
+        Args:
+            instruction: 原始用户指令
+            last_plan: 上次失败的计划
+            error: 错误信息
+            context: 上下文信息
+        
+        Returns:
+            包含分析结果和新计划的字典：
+            - analysis: 错误分析
+            - new_plan: 新的执行计划
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"开始反思失败原因，错误: {error[:100]}...")
+        
+        # 构建反思 prompt
+        reflection_prompt = self._build_reflection_prompt(
+            instruction, last_plan, error, context
+        )
+        
+        # 调用AI进行反思（子类应该重写这个方法）
+        try:
+            reflection_result = self._call_reflection_api(reflection_prompt)
+            return reflection_result
+        except Exception as e:
+            logger.error(f"反思失败: {e}")
+            # 返回一个简单的重试方案
+            return {
+                "analysis": f"反思失败: {e}，将使用原计划重试",
+                "new_plan": last_plan
+            }
+    
+    def _build_reflection_prompt(
+        self,
+        instruction: str,
+        last_plan: List[Dict[str, Any]],
+        error: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        构建反思提示词
+        
+        Args:
+            instruction: 原始指令
+            last_plan: 失败的计划
+            error: 错误信息
+            context: 上下文
+        
+        Returns:
+            反思提示词
+        """
+        import json
+        
+        plan_str = json.dumps(last_plan, ensure_ascii=False, indent=2)
+        
+        prompt = f"""你是一个任务反思专家。上一次执行失败了，请分析原因并给出新方案。
+
+## 原始任务
+{instruction}
+
+## 失败的计划
+{plan_str}
+
+## 错误信息
+{error}
+
+## 你需要做的
+1. 分析失败原因（简洁，1-2句话）
+2. 生成新的执行计划（修复之前的问题）
+
+## 输出格式
+返回一个JSON对象：
+{{
+  "analysis": "简洁的错误分析",
+  "new_plan": [
+    {{
+      "type": "步骤类型",
+      "action": "操作描述",
+      "params": {{}},
+      "description": "步骤描述"
+    }}
+  ]
+}}
+
+注意：
+- 只返回JSON，不要有其他内容
+- 新计划要解决之前的问题
+- 如果是参数问题，修正参数
+- 如果是工具不支持，改用脚本（execute_python_script）
+"""
+        return prompt
+    
+    def _call_reflection_api(self, prompt: str) -> Dict[str, Any]:
+        """
+        调用API进行反思（子类应该重写）
+        
+        Args:
+            prompt: 反思提示词
+        
+        Returns:
+            反思结果
+        """
+        raise NotImplementedError("子类必须实现 _call_reflection_api 方法")
+    
     def _parse_response(self, content: str) -> List[Dict[str, Any]]:
         """
         解析API响应（通用实现，子类可覆盖）
