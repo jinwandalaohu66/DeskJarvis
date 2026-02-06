@@ -303,9 +303,15 @@ class CodeInterpreter:
             (is_valid, error_message, fixed_code)
         """
         import ast
+        import py_compile
+        import tempfile
         
         try:
             ast.parse(code)
+            # AST 通过后，再用 py_compile 做一次更贴近解释器的语法检查
+            ok, msg = self._py_compile_check(code)
+            if not ok:
+                return False, msg, code
             return True, "", code
         except SyntaxError as e:
             error_msg = f"语法错误 第{e.lineno}行: {e.msg}"
@@ -334,10 +340,88 @@ class CodeInterpreter:
             # 重新检查修复后的代码
             try:
                 ast.parse(fixed_code)
+                # 二次检查：py_compile
+                ok, msg = self._py_compile_check(fixed_code)
+                if not ok:
+                    return False, msg, code
                 logger.info("语法错误已自动修复")
                 return True, "", fixed_code
             except SyntaxError as e2:
-                return False, f"语法错误无法自动修复: {e.msg}", code
+                return False, self._format_syntax_error(code, e), code
+
+    def _py_compile_check(self, code: str) -> Tuple[bool, str]:
+        """
+        使用 py_compile.compile() 检查语法（更贴近真实解释器）。
+
+        Args:
+            code: Python 代码
+
+        Returns:
+            (is_ok, error_message)
+        """
+        import py_compile
+        import tempfile
+
+        # py_compile 只能编译文件，因此写入临时文件
+        try:
+            tmp_dir = self.sandbox_path / "scripts"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".py",
+                prefix="syntax_check_",
+                dir=str(tmp_dir),
+                delete=False,
+            ) as f:
+                tmp_path = f.name
+                f.write(code)
+
+            py_compile.compile(tmp_path, doraise=True)
+            return True, ""
+        except py_compile.PyCompileError as e:
+            # e.exc_value 通常是 SyntaxError
+            exc_value = getattr(e, "exc_value", None)
+            if isinstance(exc_value, SyntaxError):
+                return False, self._format_syntax_error(code, exc_value)
+            return False, "语法错误无法自动修复: " + str(e)
+        except SyntaxError as e:
+            return False, self._format_syntax_error(code, e)
+        except Exception as e:
+            return False, "语法检查失败: " + str(e)
+
+    def _format_syntax_error(self, code: str, e: SyntaxError) -> str:
+        """
+        格式化语法错误信息，附带行号与代码片段，便于反思修复。
+
+        Args:
+            code: 源代码
+            e: SyntaxError
+
+        Returns:
+            格式化后的错误消息
+        """
+        lines = code.splitlines()
+        lineno = getattr(e, "lineno", None) or 0
+        offset = getattr(e, "offset", None) or 0
+        msg = getattr(e, "msg", None) or str(e)
+
+        # 取出错行前后各一行作为上下文
+        idx = max(lineno - 1, 0)
+        start = max(idx - 1, 0)
+        end = min(idx + 2, len(lines))
+        snippet = lines[start:end]
+
+        snippet_text = "\n".join(
+            [f"{start + i + 1}: {snippet[i]}" for i in range(len(snippet))]
+        ) if snippet else ""
+
+        base = f"语法错误无法自动修复: {msg}"
+        if lineno:
+            base = base + f" (line {lineno}, col {offset})"
+        if snippet_text:
+            base = base + "\n" + snippet_text
+        return base
     
     def _get_last_try_indent(self, lines: List[str]) -> str:
         """获取最后一个未配对 try 的缩进"""
