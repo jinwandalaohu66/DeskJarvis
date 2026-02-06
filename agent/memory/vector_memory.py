@@ -54,18 +54,74 @@ class VectorMemory:
         # 初始化嵌入模型
         logger.info(f"加载嵌入模型: {model_name}")
         # mypy/类型：运行时注入
-        self.model = self._SentenceTransformer(model_name)  # type: ignore[misc]
+        try:
+            self.model = self._SentenceTransformer(model_name)  # type: ignore[misc]
+        except Exception as e:
+            # sentence-transformers 首次加载可能下载模型；这里失败不应导致整个 Agent 崩溃
+            logger.error(f"嵌入模型加载失败，向量记忆功能禁用: {e}", exc_info=True)
+            self.enabled = False
+            return
         
         # 初始化 Chroma（使用新的持久化 API）
-        try:
-            self.client = self._chromadb.PersistentClient(path=str(self.db_path))  # type: ignore[union-attr]
-        except Exception as e:
-            logger.warning(f"Chroma PersistentClient 初始化失败: {e}，尝试使用 EphemeralClient")
-            self.client = self._chromadb.EphemeralClient()  # type: ignore[union-attr]
+        self.client = self._init_chroma_client()
+        if self.client is None:
+            logger.error("Chroma 客户端不可用，向量记忆功能禁用")
+            self.enabled = False
+            return
         
         # 创建集合
         self._init_collections()
         logger.info(f"向量记忆已初始化: {self.db_path}")
+
+    def _init_chroma_client(self):
+        """
+        初始化 Chroma 客户端。
+
+        关键目标：无论 Chroma Rust 后端发生什么异常（包括 pyo3 panic），都不能让整个 Agent 启动失败。
+        若持久化库损坏或版本不兼容，自动备份并重建数据目录；仍失败则降级为内存模式。
+        """
+        import shutil
+
+        # 1) 优先使用持久化
+        try:
+            return self._chromadb.PersistentClient(path=str(self.db_path))  # type: ignore[union-attr]
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e:
+            # pyo3_runtime.PanicException 可能不是 Exception，必须用 BaseException 才能兜住
+            logger.error(f"Chroma PersistentClient 初始化发生异常: {e}", exc_info=True)
+
+            # 2) 尝试备份并重建（通常是数据损坏或版本不兼容）
+            try:
+                if self.db_path.exists() and any(self.db_path.iterdir()):
+                    backup = self.db_path.parent / ("vector_memory_broken_" + str(int(time.time())))
+                    logger.warning(f"向量库可能已损坏/不兼容，备份并重建: {self.db_path} -> {backup}")
+                    try:
+                        shutil.move(str(self.db_path), str(backup))
+                    except Exception:
+                        # move 失败时尝试 copytree + rmtree
+                        shutil.copytree(str(self.db_path), str(backup), dirs_exist_ok=True)
+                        shutil.rmtree(str(self.db_path), ignore_errors=True)
+                    self.db_path.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        return self._chromadb.PersistentClient(path=str(self.db_path))  # type: ignore[union-attr]
+                    except KeyboardInterrupt:
+                        raise
+                    except BaseException as e2:
+                        logger.error(f"重建后 PersistentClient 仍失败: {e2}", exc_info=True)
+            except Exception as e3:
+                logger.error(f"备份/重建向量库目录失败: {e3}", exc_info=True)
+
+        # 3) 最后降级到内存模式，保证 Agent 可用
+        try:
+            logger.warning("降级为 Chroma EphemeralClient（内存模式，重启后不保留向量记忆）")
+            return self._chromadb.EphemeralClient()  # type: ignore[union-attr]
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e4:
+            logger.error(f"EphemeralClient 初始化失败: {e4}", exc_info=True)
+            return None
 
     def _ensure_dependencies(self, auto_install: bool = True) -> bool:
         """
