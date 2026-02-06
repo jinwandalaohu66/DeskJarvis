@@ -391,9 +391,24 @@ class VectorMemory:
         embedding = self._embed(instruction)
         doc_id = self._generate_id(instruction)
         
+        # 注意：之前对 steps_json 做字符串截断会产生“非法 JSON”，
+        # 后续读取时 json.loads 会触发 JSONDecodeError（例如 Unterminated string...），从而让主流程直接失败。
+        # 这里改为存储 compact steps（字段子集 + 数量限制），保证永远是合法 JSON，且 metadata 大小可控。
+        compact_steps: List[Dict[str, str]] = []
+        for s in steps[:20]:
+            if not isinstance(s, dict):
+                continue
+            compact_steps.append(
+                {
+                    "type": str(s.get("type", "")),
+                    "action": str(s.get("action", "")),
+                    "description": str(s.get("description", "")),
+                }
+            )
+
         meta = {
             "instruction": instruction[:500],
-            "steps_json": json.dumps(steps, ensure_ascii=False)[:2000],
+            "steps_json": json.dumps(compact_steps, ensure_ascii=False),
             "success": str(success),
             "duration": str(duration),
             "files": json.dumps(files_involved or [], ensure_ascii=False),
@@ -447,10 +462,19 @@ class VectorMemory:
             
             if similarity >= min_similarity:
                 meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                # 兼容历史脏数据：steps_json 可能被截断导致非法 JSON
+                steps_val: List[Dict] = []
+                raw_steps_json = meta.get("steps_json", "[]")
+                try:
+                    parsed = json.loads(raw_steps_json)
+                    if isinstance(parsed, list):
+                        steps_val = parsed
+                except Exception:
+                    steps_val = []
                 instructions.append({
                     "id": doc_id,
                     "instruction": meta.get("instruction", ""),
-                    "steps": json.loads(meta.get("steps_json", "[]")),
+                    "steps": steps_val,
                     "success": meta.get("success") == "True",
                     "similarity": similarity,
                     "timestamp": meta.get("timestamp", "")
