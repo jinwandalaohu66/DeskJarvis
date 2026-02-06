@@ -73,7 +73,7 @@ class ClaudePlanner(BasePlanner):
                 )
 
             # 调用Claude API
-            logger.warning(f"🔵 正在调用Claude API规划任务...")
+            logger.warning("🔵 正在调用Claude API规划任务...")
             response = call_llm(prompt)
             content = response.content[0].text if response.content else ""
             logger.warning(f"🔵 Claude原始响应（前2000字符）: {content[:2000]}...")
@@ -158,7 +158,7 @@ class ClaudePlanner(BasePlanner):
                                     step_params['save_path'] = "~/Desktop/screenshot.png"
                                     step['params'] = step_params
                                     logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
-                            logger.info(f"✅ 已自动将 screenshot_desktop 改为 browser_screenshot")
+                            logger.info("✅ 已自动将 screenshot_desktop 改为 browser_screenshot")
             
             # 后处理2：检查并修复 screenshot_desktop 缺少 save_path 的情况（仅当确实是桌面截图时）
             for i, step in enumerate(steps, 1):

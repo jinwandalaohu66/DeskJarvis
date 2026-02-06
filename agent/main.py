@@ -535,7 +535,7 @@ class DeskJarvisAgent:
             # 排除复杂指令（包含后续操作的，让AI来处理）
             # 检查连接词
             if any(kw in target for kw in ["然后", "并且", "接着", "之后"]):
-                logger.warning(f"  ✅ 检测到连接词，返回None，让AI处理")
+                logger.warning("  ✅ 检测到连接词，返回None，让AI处理")
                 return None
             # 检查动作词（如果有后续操作，让AI来处理）
             action_words = ["控制", "输入", "搜索", "按", "按下", "点击", "填写", "下载", "截图"]
@@ -543,7 +543,7 @@ class DeskJarvisAgent:
             if has_action:
                 logger.warning(f"  ✅ 检测到动作词: {[kw for kw in action_words if kw in target]}，返回None，让AI处理")
                 return None
-            logger.warning(f"  ⚠️ 未检测到动作词，fast path将处理（可能有问题）")
+            logger.warning("  ⚠️ 未检测到动作词，fast path将处理（可能有问题）")
             # 判断是路径还是应用名
             if '/' in target or target.startswith('~'):
                 dot_in_last = '.' in target.split('/')[-1]

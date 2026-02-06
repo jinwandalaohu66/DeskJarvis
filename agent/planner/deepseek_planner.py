@@ -84,7 +84,7 @@ class DeepSeekPlanner(BasePlanner):
 
             response = call_llm(messages)
             content = response.choices[0].message.content or ""
-            logger.warning(f"🔵 正在调用DeepSeek API规划任务...")
+            logger.warning("🔵 正在调用DeepSeek API规划任务...")
             logger.warning(f"🔵 DeepSeek原始响应（前2000字符）: {content[:2000]}...")
             logger.debug(f"DeepSeek完整响应: {content}")
 
