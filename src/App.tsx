@@ -8,7 +8,7 @@ import React, { useState, useEffect } from "react";
 import { ChatInterface } from "./components/ChatInterface";
 import { Settings } from "./components/Settings";
 import { ProgressPanel } from "./components/ProgressPanel";
-import { AppConfig, TaskStatus, LogEntry, AgentType, ExecutionMode } from "./types";
+import { AppConfig, TaskStatus, LogEntry, AgentType, ExecutionMode, LiveNotice } from "./types";
 import { getConfig } from "./utils/tauri";
 import { createLogger } from "./utils/logger";
 
@@ -30,6 +30,7 @@ export const App: React.FC = () => {
   const [taskSteps, setTaskSteps] = useState<Array<{ step: any; result?: any }>>([]);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
   const [taskLogs, setTaskLogs] = useState<LogEntry[]>([]);
+  const [liveNotices, setLiveNotices] = useState<LiveNotice[]>([]);
   
   // 多代理协作状态
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("single-agent");
@@ -93,6 +94,7 @@ export const App: React.FC = () => {
               onCurrentStepChange={setCurrentStepIndex}
               onLogsChange={setTaskLogs}
               onStatusChange={setTaskStatus}
+              onLiveNoticesChange={setLiveNotices}
               onProgressPanelToggle={() => setProgressCollapsed(!progressCollapsed)}
               onExecutionModeChange={setExecutionMode}
               onActiveAgentChange={setActiveAgent}
@@ -115,6 +117,7 @@ export const App: React.FC = () => {
             steps={taskSteps}
             currentStepIndex={currentStepIndex}
             logs={taskLogs}
+            liveNotices={liveNotices}
             activeAgent={activeAgent}
             executionMode={executionMode}
           />

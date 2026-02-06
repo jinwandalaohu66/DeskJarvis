@@ -2,9 +2,9 @@
  * 进度面板组件
  */
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { TaskStep, StepResult, TaskStatus, AgentType, ExecutionMode } from "../types";
+import { TaskStep, StepResult, TaskStatus, AgentType, ExecutionMode, LiveNotice } from "../types";
 
 interface ProgressPanelProps {
   collapsed: boolean;
@@ -21,6 +21,7 @@ interface ProgressPanelProps {
     message: string;
     agent?: string;
   }>;
+  liveNotices?: LiveNotice[];
   activeAgent?: AgentType;
   executionMode?: ExecutionMode;
 }
@@ -206,12 +207,33 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
   steps,
   currentStepIndex,
   logs,
+  liveNotices = [],
   activeAgent,
   executionMode = "single-agent"
 }) => {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const expandedWidth = 300;
   const collapsedWidth = 64;
+
+  // 右侧“活体状态”：即使后端在等待模型响应，前端也能持续更新耗时，避免“卡死感”
+  const taskStartRef = useRef<number | null>(null);
+  const [elapsedSec, setElapsedSec] = useState<number>(0);
+
+  useEffect(() => {
+    if (status === "idle") {
+      taskStartRef.current = null;
+      setElapsedSec(0);
+      return;
+    }
+    if (taskStartRef.current == null) {
+      taskStartRef.current = Date.now();
+    }
+    const t = window.setInterval(() => {
+      if (taskStartRef.current == null) return;
+      setElapsedSec(Math.max(0, Math.floor((Date.now() - taskStartRef.current) / 1000)));
+    }, 500);
+    return () => window.clearInterval(t);
+  }, [status]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -340,6 +362,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
                   {status === "reflecting" && "反思中"}
                   {status === "completed" && "已完成"}
                   {status === "error" && "失败"}
+                  {elapsedSec > 0 && <span className="ml-1 opacity-70">{elapsedSec}s</span>}
                 </span>
                 <div className="flex items-center gap-1.5">
                   {errorCount > 0 && (
@@ -349,6 +372,30 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
                     {completedCount}/{totalSteps}
                   </span>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* 实时提示（类似 ChatGPT/Grok 的“思考提示”） */}
+          {liveNotices.length > 0 && (
+            <div className="flex-shrink-0 px-4 pb-3">
+              <div className="space-y-2">
+                <AnimatePresence initial={false}>
+                  {liveNotices.map((n) => (
+                    <motion.div
+                      key={n.id}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.18 }}
+                      className="rounded-xl border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/30 px-3 py-2"
+                    >
+                      <div className="text-[11px] text-gray-700 dark:text-gray-200 leading-snug break-words">
+                        {n.message}
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
               </div>
             </div>
           )}

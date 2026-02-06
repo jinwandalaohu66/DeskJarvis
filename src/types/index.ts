@@ -85,6 +85,18 @@ export interface LogEntry {
 }
 
 /**
+ * 右侧面板的“实时提示”（类似 ChatGPT/Grok 的思考提示）。
+ * - 不进入聊天气泡
+ * - 自动淡出/消失（由前端控制）
+ */
+export interface LiveNotice {
+  id: string;
+  timestamp: Date;
+  message: string;
+  phase?: string;
+}
+
+/**
  * Agent 类型（多代理协作）
  */
 export type AgentType = "Planner" | "Executor" | "Reflector" | "Reviser" | "Summarizer" | "System" | "Crew";

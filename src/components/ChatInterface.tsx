@@ -14,7 +14,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult, AgentType } from "../types";
+import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult, AgentType, LiveNotice } from "../types";
 import { executeTask, isTauriEnvironment } from "../utils/tauri";
 import { ChatSidebar, ChatSession } from "./ChatSidebar";
 import { UserInputDialog, InputRequest } from "./UserInputDialog";
@@ -50,6 +50,8 @@ interface ChatInterfaceProps {
   onLogsChange?: (logs: LogEntry[]) => void;
   /** 任务状态变化回调 */
   onStatusChange?: (status: TaskStatus) => void;
+  /** 右侧实时提示变化回调（类似 ChatGPT/Grok 的思考提示） */
+  onLiveNoticesChange?: (notices: LiveNotice[]) => void;
   /** 进度面板切换回调 */
   onProgressPanelToggle?: () => void;
   /** 执行模式变化回调 */
@@ -67,6 +69,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onCurrentStepChange,
   onLogsChange,
   onStatusChange,
+  onLiveNoticesChange,
   onProgressPanelToggle,
   onExecutionModeChange,
   onActiveAgentChange,
@@ -87,6 +90,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [currentSteps, setCurrentSteps] = useState<Array<{ step: any; result?: any }>>([]);
   const [currentStepIndex, setCurrentStepIndex] = useState(-1);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [liveNotices, setLiveNotices] = useState<LiveNotice[]>([]);
   const [lastTaskContext, setLastTaskContext] = useState<any>(null); // 保存上次任务上下文
   const [isDragging, setIsDragging] = useState(false);
   const [attachedPath, setAttachedPath] = useState<string | null>(null);
@@ -407,6 +411,26 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     onActiveAgentChange?.(activeAgent);
   }, [activeAgent]);
 
+  // 同步右侧“实时提示”到父组件
+  useEffect(() => {
+    onLiveNoticesChange?.(liveNotices);
+  }, [liveNotices, onLiveNoticesChange]);
+
+  const pushLiveNotice = (message: string, phase?: string) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const notice: LiveNotice = {
+      id,
+      timestamp: new Date(),
+      message,
+      phase,
+    };
+    setLiveNotices((prev) => [...prev, notice].slice(-3));
+    // 8 秒后自动移除，形成“出现后消失”的效果
+    window.setTimeout(() => {
+      setLiveNotices((prev) => prev.filter((n) => n.id !== id));
+    }, 8000);
+  };
+
   // 自动滚动到底部（优化：只在消息数量变化时滚动，避免打字机效果时频繁滚动）
   useEffect(() => {
     // 只在消息数量变化时滚动，避免打字机效果时频繁滚动
@@ -625,11 +649,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     setCurrentSteps([]);
     setCurrentStepIndex(-1);
     setLogs([]);
+    setLiveNotices([]);
     // 通知父组件清空右侧进度面板
     onStepsChange?.([]);
     onCurrentStepChange?.(-1);
     onLogsChange?.([]);
+    onLiveNoticesChange?.([]);
     addLog("info", "开始规划任务...");
+    pushLiveNotice("收到指令，正在规划步骤…", "planning");
 
     // ✅ 先设置进度事件监听器（在消息创建之前，避免竞态条件）
     let unlistenProgress: (() => void) | null = null;
@@ -1203,22 +1230,25 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     switch (eventType) {
       // ========== 思考阶段 ==========
       case "thinking":
-        // 显示AI说的话
         const thinkingContent = eventData.content || "让我想想...";
-        accumulatedContentRef.current = thinkingContent;
-        updateAssistantMessage(thinkingContent, false);
-        updateStatus("planning");
+        // 思考提示不进入聊天气泡，只在右侧“实时提示”短暂显示
+        pushLiveNotice(thinkingContent, eventData.phase);
+        if (eventData.phase === "reflecting" || eventData.phase === "preparing_reflection") {
+          updateStatus("reflecting");
+        } else if (eventData.phase === "multi_agent") {
+          updateStatus("multi_agent");
+        } else if (eventData.phase === "executing") {
+          updateStatus("executing");
+        } else {
+          updateStatus("planning");
+        }
         break;
 
       // ========== 计划就绪 ==========
       case "plan_ready":
         const steps = eventData.steps || [];
         log.debug("[plan_ready] 收到步骤:", steps.length, "个");
-        
-        // 显示AI的计划内容
-        const planContent = eventData.content || `我来处理，共 ${steps.length} 个步骤...`;
-        accumulatedContentRef.current = planContent;
-        updateAssistantMessage(planContent, false);
+        pushLiveNotice(`计划已生成，共 ${steps.length} 步`, "planning");
         
         // 初始化步骤列表（右侧面板显示）
         if (steps.length > 0) {
@@ -1238,6 +1268,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       case "execution_started":
         updateStatus("executing");
         addLog("info", `开始执行，共 ${eventData.step_count || 0} 个步骤`);
+        pushLiveNotice(`开始执行，共 ${eventData.step_count || 0} 步`, "executing");
         break;
 
       // ========== 步骤开始 ==========
@@ -1248,9 +1279,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         
         setCurrentStepIndex(startedIndex);
         // onCurrentStepChange 由 useEffect 自动同步
-        
-        // 更新消息显示当前进度（简洁版）
-        updateAssistantMessage(`正在执行 (${startedIndex + 1}/${startedTotal})...`, false);
+        pushLiveNotice(`执行中：第 ${startedIndex + 1}/${startedTotal} 步`, "executing");
         addLog("info", `执行步骤 ${startedIndex + 1}/${startedTotal}: ${startedAction}`);
         break;
 
@@ -1280,8 +1309,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           stepResult.images.forEach((imagePath: string) => {
             addLog("info", `生成图表: ${imagePath}`);
           });
-          // 更新消息显示图表信息
-          updateAssistantMessage(`已生成 ${stepResult.images.length} 个图表`, false);
+          pushLiveNotice(`已生成 ${stepResult.images.length} 个图表`, "executing");
         }
         
         // 如果自动安装了包，记录日志
@@ -1289,8 +1317,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           addLog("info", `自动安装了依赖: ${stepResult.installed_packages.join(", ")}`);
         }
         
-        // 更新消息显示进度
-        updateAssistantMessage(`正在执行 (${completedIndex + 1}/${totalSteps})...`, false);
         addLog("success", `步骤 ${completedIndex + 1} 成功`);
         break;
 
@@ -1321,13 +1347,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       case "reflection_started":
         updateStatus("reflecting");
         addLog("info", `正在反思失败原因...`);
-        updateAssistantMessage("正在分析问题并重新规划...", false);
+        pushLiveNotice("执行失败，正在反思并尝试修复…", "reflecting");
         break;
 
       // ========== 反思完成 ==========
       case "reflection_completed":
         const newStepCount = eventData.new_step_count || 0;
         addLog("info", `反思完成，新方案有 ${newStepCount} 个步骤`);
+        pushLiveNotice(`反思完成，新方案 ${newStepCount} 步`, "reflecting");
         break;
 
       // ========== 任务完成 ==========
@@ -1340,8 +1367,10 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         
         if (success) {
           addLog("success", completedMessage || `任务完成: ${successCount}/${totalCount} 个步骤成功`);
+          pushLiveNotice("任务完成", "completed");
         } else {
           addLog("warning", completedMessage || `任务部分完成: ${successCount}/${totalCount} 个步骤成功`);
+          pushLiveNotice("任务结束（部分成功）", "completed");
         }
         break;
 
@@ -1349,16 +1378,19 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       case "error":
         const errorMessage = eventData.message || "未知错误";
         addLog("error", errorMessage);
+        pushLiveNotice("发生错误：" + errorMessage, "error");
         updateStatus("idle");
         break;
 
       // ========== 其他事件 ==========
       case "browser_starting":
         addLog("info", "正在启动浏览器...");
+        pushLiveNotice("正在启动浏览器…", "executing");
         break;
 
       case "browser_started":
         addLog("success", "浏览器已启动");
+        pushLiveNotice("浏览器已启动", "executing");
         break;
 
       case "browser_stopping":
@@ -1374,6 +1406,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         log.debug("[request_input] 收到用户输入请求:", eventData);
         setUserInputRequest(eventData as InputRequest);
         addLog("info", `等待用户输入: ${eventData.title || "请输入"}`);
+        pushLiveNotice("需要你输入信息，等待中…", "executing");
+        break;
+
+      // ========== CodeInterpreter 进度事件 ==========
+      case "installing_packages":
+      case "installing":
+      case "retrying":
+        if (eventData.message) {
+          pushLiveNotice(String(eventData.message), "executing");
+          addLog("info", String(eventData.message));
+        }
         break;
 
       // ========== 多代理协作事件 ==========
