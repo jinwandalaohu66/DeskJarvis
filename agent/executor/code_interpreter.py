@@ -125,6 +125,9 @@ class CodeInterpreter:
         # 0. 处理 base64 编码的代码
         code = self._decode_script(code)
         
+        # 0.5 预处理：修复常见的 AI 代码错误
+        code = self._preprocess_code(code)
+        
         # 1. 安全检查
         security_check = self._check_security(code)
         if not security_check[0]:
@@ -232,6 +235,34 @@ class CodeInterpreter:
                 cleaned_chars.append(char)
         
         return ''.join(cleaned_chars)
+    
+    def _preprocess_code(self, code: str) -> str:
+        """
+        预处理代码，修复常见的 AI 生成错误
+        
+        Returns:
+            修复后的代码
+        """
+        # 1. 修复 f-string 前有空格的问题 (f "..." -> f"...")
+        code = re.sub(r'\bf\s+"', 'f"', code)
+        code = re.sub(r"\bf\s+'", "f'", code)
+        
+        # 2. 修复 r-string 前有空格的问题 (r "..." -> r"...")
+        code = re.sub(r'\br\s+"', 'r"', code)
+        code = re.sub(r"\br\s+'", "r'", code)
+        
+        # 3. 修复 b-string 前有空格的问题 (b "..." -> b"...")
+        code = re.sub(r'\bb\s+"', 'b"', code)
+        code = re.sub(r"\bb\s+'", "b'", code)
+        
+        # 4. 修复常见的 colormap 名称错误
+        code = code.replace("plt.cm.set3", "plt.cm.tab20")
+        code = code.replace("plt.cm.Set3", "plt.cm.tab20")
+        code = code.replace("cm.set3", "cm.tab20")
+        code = code.replace("cm.Set3", "cm.tab20")
+        
+        logger.debug("代码预处理完成")
+        return code
     
     def _check_security(self, code: str) -> Tuple[bool, str]:
         """
@@ -484,6 +515,11 @@ _dj_save_current_figure()
         """
         fixed_code = code
         
+        # 0. 修复 f-string 前有空格的问题 (f "..." -> f"...")
+        # 这是 AI 常犯的错误
+        fixed_code = re.sub(r'\bf\s+"', 'f"', fixed_code)
+        fixed_code = re.sub(r"\bf\s+'", "f'", fixed_code)
+        
         # 1. 修复常见语法错误
         # 缺少引号闭合
         if "unterminated string" in error or "EOL while scanning" in error:
@@ -495,7 +531,7 @@ _dj_save_current_figure()
             fixed_code = self._fix_indentation(fixed_code)
         
         # 3. 修复 f-string 错误
-        if "f-string" in error:
+        if "f-string" in error or "invalid syntax" in error:
             fixed_code = self._fix_fstring(fixed_code)
         
         # 4. 修复变量未定义
