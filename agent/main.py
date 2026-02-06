@@ -341,8 +341,6 @@ class DeskJarvisAgent:
         thinking_msg: str,
     ) -> Dict[str, Any]:
         """执行快速通道的单步任务，发送完整的前端事件"""
-        start_time = time.time()
-        
         emit("thinking", {"content": thinking_msg, "phase": "fast_path"})
         emit("plan_ready", {
             "content": step.get("action", "执行任务"),
@@ -389,7 +387,6 @@ class DeskJarvisAgent:
                 "total_count": 1,
             })
         
-        duration = time.time() - start_time
         step_result = {"step": step, "result": result}
         
         # ⚠️ 快速通道任务完全跳过记忆保存，保持"快速"特性
