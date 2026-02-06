@@ -137,6 +137,17 @@ class CodeInterpreter:
                 error=security_check[1]
             )
         
+        # 1.5 语法预检查（自动修复常见语法错误）
+        syntax_check = self._check_syntax(code)
+        if not syntax_check[0]:
+            return CodeExecutionResult(
+                success=False,
+                message=f"语法错误: {syntax_check[1]}",
+                error=syntax_check[1]
+            )
+        # 使用修复后的代码
+        code = syntax_check[2]
+        
         # 2. 分析并安装缺失的包
         if auto_install:
             missing_packages = self._detect_missing_packages(code)
@@ -283,6 +294,68 @@ class CodeInterpreter:
                 logger.warning("代码可能访问沙盒外路径，但允许执行")
         
         return True, ""
+    
+    def _check_syntax(self, code: str) -> Tuple[bool, str, str]:
+        """
+        使用 AST 检查代码语法
+        
+        Returns:
+            (is_valid, error_message, fixed_code)
+        """
+        import ast
+        
+        try:
+            ast.parse(code)
+            return True, "", code
+        except SyntaxError as e:
+            error_msg = f"语法错误 第{e.lineno}行: {e.msg}"
+            logger.warning(f"检测到语法错误: {error_msg}")
+            
+            # 尝试自动修复常见语法错误
+            fixed_code = code
+            
+            # 1. 检查是否缺少 except 块
+            if "expected 'except' or 'finally' block" in str(e.msg):
+                # 在代码末尾添加 except 块
+                lines = code.rstrip().split('\n')
+                indent = self._get_last_try_indent(lines)
+                except_block = f"\n{indent}except Exception as e:\n{indent}    import json\n{indent}    print(json.dumps({{\"success\": False, \"message\": str(e)}}))"
+                fixed_code = code.rstrip() + except_block
+                logger.info("自动修复: 添加缺失的 except 块")
+            
+            # 2. 修复 os.name.astype() 等不存在的方法
+            if "os.name.astype()" in code:
+                fixed_code = fixed_code.replace("os.name.astype()", "sys.platform")
+                # 确保 import sys
+                if "import sys" not in fixed_code:
+                    fixed_code = "import sys\n" + fixed_code
+                logger.info("自动修复: 替换 os.name.astype() 为 sys.platform")
+            
+            # 重新检查修复后的代码
+            try:
+                ast.parse(fixed_code)
+                logger.info("语法错误已自动修复")
+                return True, "", fixed_code
+            except SyntaxError as e2:
+                return False, f"语法错误无法自动修复: {e.msg}", code
+    
+    def _get_last_try_indent(self, lines: List[str]) -> str:
+        """获取最后一个未配对 try 的缩进"""
+        try_count = 0
+        except_count = 0
+        last_try_indent = ""
+        
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("try:"):
+                try_count += 1
+                last_try_indent = line[:len(line) - len(stripped)]
+            elif stripped.startswith("except") or stripped.startswith("finally"):
+                except_count += 1
+        
+        if try_count > except_count:
+            return last_try_indent
+        return ""
     
     def _detect_missing_packages(self, code: str) -> List[str]:
         """

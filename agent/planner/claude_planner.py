@@ -262,8 +262,9 @@ execute_python_script 的 params:
 4. **语法检查（极其重要）**：
    - 每个引号必须配对闭合
    - 每个括号必须配对闭合
-   - try 必须有 except
+   - **每个 try 必须有 except**（最常见错误！）
    - 字符串拼接格式: "文字" + str(变量) + "文字"
+   - **平台检测**：`import sys; sys.platform == "darwin"/"win32"/"linux"`
 5. 注释使用中文，变量名使用英文
 6. 用户主目录: {home_dir}
 7. **错误处理**：所有操作必须在 try-except 中，except 中输出 JSON 格式的错误信息

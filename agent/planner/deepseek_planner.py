@@ -318,11 +318,28 @@ class DeepSeekPlanner(BasePlanner):
       正确: "成功删除 " + str(count) + " 个文件"
       错误: "成功删除 " + str(count) " 个文件"  (缺少 +)
       错误: "成功删除 " + str(count) + " 个文件  (缺少闭合引号)
+    - **try-except 必须完整配对（极其重要！）**：
+      正确格式：
+      ```python
+      try:
+          # 代码
+      except Exception as e:
+          print(json.dumps({{"success": False, "message": str(e)}}))
+      ```
+      错误：只有 try 没有 except，会导致 SyntaxError！
     - **生成脚本后务必检查**：
       1. 每个引号都有配对
       2. 每个括号都有配对
-      3. try 必须有 except
+      3. **每个 try 必须有 except**（最常见错误！）
       4. 字符串拼接的 + 号不能漏
+    - **平台检测正确方法**：
+      ```python
+      import sys
+      if sys.platform == "darwin":  # macOS
+      elif sys.platform == "win32":  # Windows
+      elif sys.platform == "linux":  # Linux
+      ```
+      **错误**: `os.name.astype()` 根本不存在！
   * **Matplotlib 图表绑定用法**：
     - 使用 `plt.pie()` 画饼图，使用 `plt.bar()` 画柱状图
     - 饼图颜色使用列表：`colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']`
