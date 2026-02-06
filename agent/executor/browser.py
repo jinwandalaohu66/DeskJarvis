@@ -131,6 +131,8 @@ class BrowserExecutor:
                 return self._fill(params)
             elif step_type == "browser_wait":
                 return self._wait(params)
+            elif step_type == "browser_check_element":
+                return self._check_element(params)
             elif step_type == "browser_screenshot":
                 return self._screenshot(params)
             elif step_type == "download_file":
@@ -515,6 +517,43 @@ class BrowserExecutor:
             }
         except Exception as e:
             error_msg = f"等待失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            raise BrowserError(error_msg) from e
+
+    def _check_element(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        检查页面元素是否存在/可见（用于兼容 planner 生成的 browser_check_element）。
+        
+        Params:
+            - selector: CSS 选择器（可选）
+            - text: 文本内容（可选，优先使用）
+            - timeout: 超时时间（毫秒，默认5000）
+            - state: "attached"/"visible"/"hidden"/"detached"（默认 visible）
+        """
+        selector = params.get("selector")
+        text = params.get("text")
+        timeout = params.get("timeout", 5000)
+        state = params.get("state", "visible")
+
+        if not selector and not text:
+            raise BrowserError("检查参数缺少 selector 或 text")
+
+        try:
+            if text:
+                locator = self.page.get_by_text(str(text)).first
+                locator.wait_for(state=state, timeout=timeout)
+                target = f"text={text}"
+            else:
+                self.page.wait_for_selector(str(selector), state=state, timeout=timeout)
+                target = selector
+
+            return {
+                "success": True,
+                "message": f"元素可用: {target}",
+                "data": {"selector": selector, "text": text, "state": state}
+            }
+        except Exception as e:
+            error_msg = f"元素不可用: {selector or text} - {str(e)}"
             logger.error(error_msg, exc_info=True)
             raise BrowserError(error_msg) from e
     

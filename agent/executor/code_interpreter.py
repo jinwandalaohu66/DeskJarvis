@@ -191,7 +191,8 @@ class CodeInterpreter:
                 last_error = "脚本验证失败: " + validation.message
                 if validation.details:
                     last_error = last_error + "\n" + validation.details
-                self._emit_progress("validation_failed", validation.message)
+                details = validation.details[:1200] if validation.details else ""
+                self._emit_progress("validation_failed", validation.message, {"details": details})
                 # 还有重试机会就继续（让 _try_fix_error 有机会修）
                 if attempt < max_retries:
                     continue
@@ -886,10 +887,13 @@ _dj_save_current_figure()
         if len(self.code_history) > 100:
             self.code_history = self.code_history[-100:]
     
-    def _emit_progress(self, event_type: str, message: str):
+    def _emit_progress(self, event_type: str, message: str, data: Optional[Dict[str, Any]] = None):
         """发送进度事件"""
+        payload = {"message": message}
+        if data:
+            payload.update(data)
         if self.emit:
-            self.emit(event_type, {"message": message})
+            self.emit(event_type, payload)
         logger.info(f"[{event_type}] {message}")
     
     def get_execution_stats(self) -> Dict:

@@ -312,6 +312,7 @@ class DeepSeekPlanner(BasePlanner):
   * 安全：文件操作限制在用户主目录或沙盒目录（~/Desktop, ~/Downloads, ~/.deskjarvis/sandbox）
   * 禁止危险命令：rm -rf /, sudo, chmod 777 等
   * 必须使用 try-except 包裹可能失败的操作
+  * **本地文件统计/生成图表必须用 execute_python_script**，不要使用任何 browser_* 工具
   * **必须通过 ruff 快检（E/F/B）**：系统会在执行前自动运行 `ruff check --select E,F,B`，不通过会直接失败并进入反思重试
     - 常见必修点：只 import 你真正用到的（避免 F401），不要引用未定义变量（F821），不要 `except:`（E722），确保没有语法错误（E999），`raise` 保留异常链（B904）
   * 输出格式：`print(json.dumps({{"success": True 或 False, "message": "...", "data": {{...}}}}))`

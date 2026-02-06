@@ -1419,6 +1419,9 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           pushLiveNotice(String(eventData.message), "executing");
           addLog("info", String(eventData.message));
         }
+        if (eventType === "validation_failed" && eventData.details) {
+          addLog("error", "ruff: " + String(eventData.details));
+        }
         break;
 
       // ========== 多代理协作事件 ==========
