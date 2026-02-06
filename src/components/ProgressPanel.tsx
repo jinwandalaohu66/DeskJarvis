@@ -175,9 +175,10 @@ const StepItem: React.FC<{
 };
 
 const panelTransition = {
-  type: "tween" as const,
-  duration: 0.2,
-  ease: [0.4, 0, 0.2, 1] as const,
+  type: "spring" as const,
+  stiffness: 280,
+  damping: 35,
+  mass: 0.9,
 };
 
 // 收起状态的按钮样式
@@ -212,7 +213,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
   executionMode = "single-agent"
 }) => {
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const expandedWidth = 300;
+  const expandedWidth = 260;
   const collapsedWidth = 64;
 
   // 右侧“活体状态”：即使后端在等待模型响应，前端也能持续更新耗时，避免“卡死感”
@@ -252,7 +253,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
       style={{ flexShrink: 0 }}
     >
       {/* 顶部按钮区域 - 使用条件渲染 */}
-      <div className="flex-shrink-0 pt-4 pb-2">
+      <div className="flex-shrink-0 pt-4 pb-2 overflow-hidden">
         {collapsed ? (
           // 收起状态：垂直居中排列
           <div style={{ width: '64px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
@@ -324,8 +325,15 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
       </div>
 
       {/* 展开时的内容 */}
-      {!collapsed && (
-        <div className="flex-1 flex flex-col overflow-hidden">
+      <AnimatePresence>
+        {!collapsed && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex-1 flex flex-col overflow-hidden"
+          >
           {/* 多代理模式指示器 */}
           {executionMode === "multi-agent" && activeAgent && (
             <div className="flex-shrink-0 mx-4 mb-3">
@@ -493,8 +501,9 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
               </details>
             </div>
           )}
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 };

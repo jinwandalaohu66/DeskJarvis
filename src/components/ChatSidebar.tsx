@@ -3,7 +3,7 @@
  */
 
 import React, { useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 
 export interface ChatSession {
   id: string;
@@ -25,9 +25,10 @@ interface ChatSidebarProps {
 }
 
 const panelTransition = {
-  type: "tween" as const,
-  duration: 0.2,
-  ease: [0.4, 0, 0.2, 1] as const,
+  type: "spring" as const,
+  stiffness: 280,
+  damping: 35,
+  mass: 0.9,
 };
 
 export const ChatSidebar: React.FC<ChatSidebarProps> = ({
@@ -96,6 +97,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
       initial={false}
       animate={{ width: collapsed ? collapsedWidth : expandedWidth }}
       transition={panelTransition}
+      layout
       className="h-full bg-black dark:bg-white flex flex-col overflow-hidden flex-shrink-0"
       style={{ 
         borderTopRightRadius: '1.5rem',
@@ -103,7 +105,7 @@ export const ChatSidebar: React.FC<ChatSidebarProps> = ({
       }}
     >
       {/* 顶部按钮区域 */}
-      <div className="flex-shrink-0 pt-4 pb-2">
+      <div className="flex-shrink-0 pt-4 pb-2 overflow-hidden">
         {collapsed ? (
           // 收起状态：垂直居中排列 - 使用固定宽度 64px 容器
           <div style={{ width: '64px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>

@@ -2379,22 +2379,62 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 <button
                   onClick={handleSend}
                   disabled={status === "idle" && !input.trim()}
-                  className={`flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full bg-black dark:bg-white text-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
+                  className={`flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-full bg-black dark:bg-white text-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white disabled:opacity-50 disabled:cursor-not-allowed transition-all relative ${
                     status !== "idle" ? "hover:bg-red-600 dark:hover:bg-red-400" : "shadow-sm hover:shadow-md"
                   }`}
                   title={status !== "idle" ? "停止任务" : "发送"}
                 >
-                  {status !== "idle" ? (
-                    // 任务执行中显示停止图标
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  ) : (
-                    // 正常状态显示箭头
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 15l7-7 7 7" />
-                    </svg>
-                  )}
+                  <AnimatePresence initial={false}>
+                    {status !== "idle" ? (
+                      // 任务执行中显示停止图标（正方形方块）
+                      <motion.div
+                        key="stop"
+                        initial={{ opacity: 0, scale: 0.5, rotate: -90 }}
+                        animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                        exit={{ opacity: 0, scale: 0.5, rotate: 90 }}
+                        transition={{ 
+                          type: "spring",
+                          stiffness: 600,
+                          damping: 30,
+                          duration: 0.2
+                        }}
+                        style={{ 
+                          position: "absolute",
+                          display: "flex", 
+                          alignItems: "center", 
+                          justifyContent: "center" 
+                        }}
+                      >
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                          <rect x="4" y="4" width="16" height="16" rx="1.5" />
+                        </svg>
+                      </motion.div>
+                    ) : (
+                      // 正常状态显示箭头
+                      <motion.div
+                        key="send"
+                        initial={{ opacity: 0, scale: 0.5, rotate: 90 }}
+                        animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                        exit={{ opacity: 0, scale: 0.5, rotate: -90 }}
+                        transition={{ 
+                          type: "spring",
+                          stiffness: 600,
+                          damping: 30,
+                          duration: 0.2
+                        }}
+                        style={{ 
+                          position: "absolute",
+                          display: "flex", 
+                          alignItems: "center", 
+                          justifyContent: "center" 
+                        }}
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 15l7-7 7 7" />
+                        </svg>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </button>
               </div>
             </div>
