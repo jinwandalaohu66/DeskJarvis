@@ -5,6 +5,7 @@ omit =
     agent/executor/*
     agent/crew/*
     agent/main.py
+    agent/server.py
     agent/planner/*
     agent/scheduler.py
     agent/workflows.py
