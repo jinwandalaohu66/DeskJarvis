@@ -11,9 +11,9 @@
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional
 import uuid
 import threading
 
@@ -104,9 +104,13 @@ class MemoryManager:
         
         # 3. 向量记忆上下文（语义搜索）
         if include_vector and self.vector.enabled:
-            vector_context = self.vector.get_memory_context(instruction, limit=3)
-            if vector_context:
-                context_parts.append(vector_context)
+            try:
+                vector_context = self.vector.get_memory_context(instruction, limit=3)
+                if vector_context:
+                    context_parts.append(vector_context)
+            except Exception as e:
+                # 记忆系统是“增强能力”，不应该阻塞主流程
+                logger.warning(f"获取向量记忆上下文失败，将跳过向量记忆: {e}")
         
         # 4. 高级记忆上下文
         advanced_context = self.advanced.get_memory_context()
@@ -379,8 +383,6 @@ class MemoryManager:
     def _record_habits(self, instruction: str, steps: List[Dict]):
         """记录习惯模式"""
         # 记录指令模式
-        import re
-        
         # 检测常用动词
         action_words = ["下载", "整理", "删除", "重命名", "移动", "复制", "总结", "搜索"]
         for word in action_words:
