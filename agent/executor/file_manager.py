@@ -12,6 +12,7 @@ from datetime import datetime
 import time
 from agent.tools.exceptions import FileManagerError
 from agent.tools.config import Config
+from agent.tools.path_validator import validate_path
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,7 @@ class FileManager:
     
     def _validate_path(self, file_path: Path) -> Path:
         """
-        验证文件路径是否安全
-        
-        安全策略：
-        1. 优先检查是否在用户主目录下（允许）
-        2. 检查是否在沙盒目录下（允许）
-        3. 检查是否是禁止的系统关键路径
+        验证文件路径是否安全（使用统一路径验证函数）
         
         Args:
             file_path: 文件路径
@@ -84,53 +80,13 @@ class FileManager:
         Raises:
             FileManagerError: 如果路径不安全
         """
-        # 转换为绝对路径
-        abs_path = file_path.resolve()
-        home = Path.home()
-        
-        # 优先检查：是否在用户主目录下（允许）
+        # 使用统一的路径验证函数
         try:
-            abs_path.relative_to(home)
-            # 在用户主目录下，允许操作
-            return abs_path
-        except ValueError:
-            pass
-        
-        # 检查是否在沙盒目录下（允许）
-        try:
-            abs_path.relative_to(self.sandbox_path.resolve())
-            return abs_path
-        except ValueError:
-            pass
-        
-        # 检查是否是禁止的系统关键路径
-        # 注意：先检查允许路径，再检查禁止路径，避免误判
-        for forbidden in self.forbidden_paths:
-            if forbidden == Path("/"):
-                # 特殊处理：根路径 / 不应该匹配所有路径
-                # 只检查路径是否直接是根路径的子路径（排除 /Users）
-                if abs_path == Path("/"):
-                    raise FileManagerError(f"禁止操作系统关键路径: {abs_path}")
-                # 如果路径在 /Users 下，已经在上面允许了
-                if len(abs_path.parts) > 1 and abs_path.parts[1] == "Users":
-                    continue
-                # 其他根路径下的直接子目录（如 /System, /Library）是禁止的
-                if len(abs_path.parts) == 2:
-                    if abs_path.parts[1] in ["System", "Library", "Applications", "usr", "bin", "sbin", "etc", "var", "private"]:
-                        raise FileManagerError(f"禁止操作系统关键路径: {abs_path}")
-            else:
-                # 对于其他禁止路径，检查是否在路径下
-                try:
-                    abs_path.relative_to(forbidden)
-                    raise FileManagerError(f"禁止操作系统关键路径: {abs_path}")
-                except ValueError:
-                    pass  # 不在禁止路径内，继续检查
-        
-        # 如果都不匹配，拒绝操作
-        raise FileManagerError(
-            f"路径不在允许的操作范围内: {abs_path}。"
-            f"只允许操作用户主目录（{home}）和沙盒目录（{self.sandbox_path}）下的文件。"
-        )
+            return validate_path(file_path, self.sandbox_path, allow_home=True)
+        except FileManagerError:
+            raise
+        except Exception as e:
+            raise FileManagerError(f"路径验证失败: {e}")
     
     def _safe_move(self, source: Path, target: Path) -> None:
         """

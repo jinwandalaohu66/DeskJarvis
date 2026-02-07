@@ -9,6 +9,7 @@ from pathlib import Path
 import json
 import logging
 from agent.tools.exceptions import ConfigError
+from agent.tools.key_encryptor import KeyEncryptor
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class Config:
     
     def load(self) -> None:
         """
-        加载配置文件
+        加载配置文件（自动解密 API Key）
         
         Raises:
             ConfigError: 当配置文件格式错误时
@@ -70,6 +71,14 @@ class Config:
             if self.config_path.exists():
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     self._config = json.load(f)
+                
+                # 自动解密 API Key（如果已加密）
+                if "api_key" in self._config:
+                    encrypted_key = self._config["api_key"]
+                    if encrypted_key and encrypted_key.startswith("ENC:"):
+                        self._config["api_key"] = KeyEncryptor.decrypt(encrypted_key)
+                        logger.debug("[SECURITY_SHIELD] API Key 已自动解密")
+                
                 logger.info(f"配置文件已加载: {self.config_path}")
             else:
                 # 使用默认配置
@@ -88,15 +97,25 @@ class Config:
     
     def save(self) -> None:
         """
-        保存配置到文件
+        保存配置到文件（自动加密 API Key）
         
         Raises:
             ConfigError: 当保存失败时
         """
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 创建副本用于保存（加密 API Key）
+            config_to_save = self._config.copy()
+            if "api_key" in config_to_save:
+                plain_key = config_to_save["api_key"]
+                if plain_key and not plain_key.startswith("ENC:"):
+                    # 加密 API Key
+                    config_to_save["api_key"] = KeyEncryptor.encrypt(plain_key)
+                    logger.debug("[SECURITY_SHIELD] API Key 已自动加密")
+            
             with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self._config, f, indent=2, ensure_ascii=False)
+                json.dump(config_to_save, f, indent=2, ensure_ascii=False)
             logger.debug(f"配置已保存: {self.config_path}")
         except Exception as e:
             raise ConfigError(f"保存配置文件失败: {e}")

@@ -70,6 +70,18 @@ class TaskOrchestrator:
         
         # 将会话缓存注入 context，供 Planner 和 Executor 共享 (Protocol R3)
         context["_file_context_buffer"] = self.file_context_buffer
+        
+        # 检查停止标志（如果 context 中有停止检查函数）
+        check_stop = context.get("_check_stop")
+        if check_stop and callable(check_stop):
+            if check_stop():
+                logger.info("任务在执行前已被停止")
+                return {
+                    "success": False,
+                    "message": "任务已取消",
+                    "steps": [],
+                    "user_instruction": user_instruction
+                }
             
         emit("thinking", {
             "content": "Received instruction: " + user_instruction[:50] + "...",
@@ -100,6 +112,17 @@ class TaskOrchestrator:
              # 假设 planner.plan(instruction, context) -> steps
              plan_steps = self.planner.plan(user_instruction, context)
              
+             # 规划后再次检查停止标志
+             check_stop = context.get("_check_stop")
+             if check_stop and callable(check_stop) and check_stop():
+                 logger.info("任务在规划后已被停止")
+                 return {
+                     "success": False,
+                     "message": "任务已取消",
+                     "steps": [],
+                     "user_instruction": user_instruction
+                 }
+             
              emit("plan_ready", {
                 "content": "Plan generated.",
                 "steps": plan_steps,
@@ -116,6 +139,10 @@ class TaskOrchestrator:
             }
             
         # 4. 执行计划 (Executor)
+        # 确保 context 中包含停止检查函数
+        check_stop = context.get("_check_stop")
+        if check_stop:
+            context["_check_stop"] = check_stop
         result = self.executor.execute_plan(
             plan=plan_steps,
             user_instruction=user_instruction,
@@ -124,7 +151,7 @@ class TaskOrchestrator:
         
         duration = time.time() - start_time
         
-        # 5. 保存记忆 (Memory) - 异步执行，避免阻塞和触发向量化进度条
+        # 5. 保存记忆 (Memory) - 使用线程安全队列，避免阻塞和并发冲突
         if self.memory and result.get("success"):
             try:
                 # 提取文件
@@ -134,25 +161,22 @@ class TaskOrchestrator:
                      for k in ["path", "file_path", "save_path"]:
                          if k in p: files_involved.append(p[k])
                 
-                # 异步保存记忆，避免阻塞主流程和触发向量化进度条
-                import threading
-                def save_memory_async():
-                    try:
-                        self.memory.save_task_result(
-                            instruction=user_instruction,
-                            steps=[s["step"] for s in result.get("steps", [])],
-                            result=result,
-                            success=True,
-                            duration=duration,
-                            files_involved=files_involved
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to save memory: {e}")
+                # 使用线程安全队列保存记忆（非阻塞，带文件锁）
+                if not hasattr(self, '_memory_queue'):
+                    from agent.tools.memory_queue import ThreadSafeMemoryQueue
+                    self._memory_queue = ThreadSafeMemoryQueue(self.memory)
                 
-                thread = threading.Thread(target=save_memory_async, daemon=True)
-                thread.start()
+                self._memory_queue.enqueue_save(
+                    instruction=user_instruction,
+                    steps=[s["step"] for s in result.get("steps", [])],
+                    result=result,
+                    success=True,
+                    duration=duration,
+                    files_involved=files_involved
+                )
+                logger.debug("[SECURITY_SHIELD] 记忆保存任务已加入线程安全队列")
             except Exception as e:
-                logger.warning(f"Failed to start memory save thread: {e}")
+                logger.warning(f"[SECURITY_SHIELD] 加入记忆存储队列失败: {e}")
                 
         return result
 

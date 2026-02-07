@@ -563,9 +563,19 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   }, [messages, currentChatId]);
 
   // 停止当前任务
-  const handleStop = () => {
+  const handleStop = async () => {
     log.debug("🛑 [handleStop] 用户请求停止任务");
     isTaskCancelledRef.current = true;
+    
+    // 向后端发送停止命令
+    try {
+      const { stopTask } = await import("../utils/tauri");
+      await stopTask();
+      log.debug("✅ [handleStop] 停止命令已发送到后端");
+    } catch (error) {
+      log.error("❌ [handleStop] 发送停止命令失败:", error);
+      // 即使发送失败，也继续执行前端的清理工作
+    }
     
     // 清理进度事件监听器
     if (unlistenProgressRef.current) {

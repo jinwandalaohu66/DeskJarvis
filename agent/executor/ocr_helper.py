@@ -7,7 +7,7 @@ OCR Helper for CAPTCHA Recognition and Text Extraction
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 import base64
 
 logger = logging.getLogger(__name__)
@@ -225,3 +225,126 @@ class OCRHelper:
             True 如果可用
         """
         return self._ensure_initialized() and self.ocr is not None
+    
+    def find_text_coordinates(self, image_base64: str, target_text: str, fuzzy_match: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        查找文本在图片中的坐标（bounding box）
+        
+        功能：
+        - 使用 OCR 识别图片中的所有文本及其位置
+        - 查找目标文本的 bounding box
+        - 返回中心坐标和边界框信息
+        
+        Args:
+            image_base64: base64编码的图片（可包含data:image前缀）
+            target_text: 要查找的文本（支持部分匹配）
+            fuzzy_match: 是否使用模糊匹配（默认True，支持部分文本匹配）
+        
+        Returns:
+            包含坐标信息的字典，格式：
+            {
+                "x": 中心X坐标,
+                "y": 中心Y坐标,
+                "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                "confidence": 置信度（0-1）,
+                "matched_text": 匹配到的完整文本
+            }
+            如果未找到，返回 None
+        """
+        if not self._ensure_initialized():
+            return None
+        
+        try:
+            # 移除 data:image 前缀
+            if "base64," in image_base64:
+                image_base64 = image_base64.split("base64,")[1]
+            
+            # 解码
+            image_bytes = base64.b64decode(image_base64)
+            
+            # 优先使用 Tesseract OCR（支持坐标信息）
+            if self.tesseract_available:
+                try:
+                    import pytesseract
+                    from PIL import Image
+                    import io
+                    import re
+                    
+                    # 将字节转换为PIL Image
+                    image = Image.open(io.BytesIO(image_bytes))
+                    
+                    # 使用 Tesseract 获取文本和坐标信息
+                    try:
+                        langs = pytesseract.get_languages()
+                        lang = 'chi_sim+eng' if 'chi_sim' in langs else 'eng'
+                    except Exception:
+                        lang = 'chi_sim+eng'
+                    
+                    # 获取详细的 OCR 数据（包含坐标）
+                    ocr_data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
+                    
+                    # 查找目标文本
+                    target_lower = target_text.lower().strip()
+                    matched_boxes = []
+                    
+                    for i in range(len(ocr_data['text'])):
+                        text = ocr_data['text'][i].strip()
+                        if not text:
+                            continue
+                        
+                        # 检查是否匹配
+                        is_match = False
+                        if fuzzy_match:
+                            # 模糊匹配：检查目标文本是否包含在识别文本中，或反之
+                            is_match = (target_lower in text.lower()) or (text.lower() in target_lower)
+                        else:
+                            # 精确匹配
+                            is_match = (text.lower() == target_lower)
+                        
+                        if is_match:
+                            # 获取边界框
+                            left = ocr_data['left'][i]
+                            top = ocr_data['top'][i]
+                            width = ocr_data['width'][i]
+                            height = ocr_data['height'][i]
+                            conf = float(ocr_data['conf'][i]) / 100.0  # 转换为 0-1
+                            
+                            # 计算中心坐标
+                            center_x = left + width / 2
+                            center_y = top + height / 2
+                            
+                            matched_boxes.append({
+                                "x": int(center_x),
+                                "y": int(center_y),
+                                "bbox": {
+                                    "left": left,
+                                    "top": top,
+                                    "right": left + width,
+                                    "bottom": top + height
+                                },
+                                "confidence": conf,
+                                "matched_text": text
+                            })
+                    
+                    if matched_boxes:
+                        # 返回置信度最高的匹配（或第一个）
+                        best_match = max(matched_boxes, key=lambda b: b['confidence'])
+                        logger.info(f"[SECURITY_SHIELD] OCR找到文本 '{target_text}' 的坐标: ({best_match['x']}, {best_match['y']}), 置信度: {best_match['confidence']:.2f}")
+                        return best_match
+                    else:
+                        logger.debug(f"[SECURITY_SHIELD] OCR未找到文本 '{target_text}'")
+                        return None
+                        
+                except Exception as e:
+                    logger.warning(f"[SECURITY_SHIELD] Tesseract OCR坐标查找失败: {e}")
+                    # 回退到简单的文本提取（不包含坐标）
+                    return None
+            
+            # 如果 Tesseract 不可用，无法获取坐标信息
+            logger.warning("[SECURITY_SHIELD] Tesseract OCR 不可用，无法获取文本坐标")
+            logger.info("💡 建议安装 Tesseract OCR 以获得文本坐标功能: brew install tesseract tesseract-lang")
+            return None
+                
+        except Exception as e:
+            logger.error(f"[SECURITY_SHIELD] OCR坐标查找失败: {e}", exc_info=True)
+            return None

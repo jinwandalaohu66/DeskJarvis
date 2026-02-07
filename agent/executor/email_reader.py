@@ -6,11 +6,44 @@ import imaplib
 import email
 from email.header import decode_header
 import logging
+import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# 全局停止事件单例
+_stop_event = threading.Event()
+
+def get_stop_event():
+    """获取全局停止事件单例"""
+    return _stop_event
+
+def set_stop_event():
+    """设置停止事件"""
+    _stop_event.set()
+    logger.info("停止事件已设置")
+
+def clear_stop_event():
+    """清除停止事件"""
+    _stop_event.clear()
+    logger.info("停止事件已清除")
+
+def safe_encode_uid(uid: Any) -> str:
+    """
+    安全编码邮件UID，确保只包含ASCII字符
+    如果包含非ASCII字符，使用 'ignore' 策略移除
+    """
+    if uid is None:
+        return ""
+    uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
+    try:
+        # 尝试编码为ASCII，如果失败则使用ignore策略
+        return uid_str.encode('ascii', 'ignore').decode('ascii')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        # 如果仍然失败，使用更宽松的策略
+        return uid_str.encode('ascii', 'ignore').decode('ascii', 'ignore')
 
 class EmailReader:
     def __init__(self, imap_server: str, imap_port: int = 993):
@@ -21,7 +54,13 @@ class EmailReader:
     def connect(self, email_user: str, email_pass: str) -> bool:
         """Connect and login to IMAP server"""
         try:
+            # 检查停止事件
+            if get_stop_event().is_set():
+                raise RuntimeError("任务已停止")
+            
+            # 设置超时时间为 10 秒
             self.mail = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
+            self.mail.sock.settimeout(10)
             self.mail.login(email_user, email_pass)
             logger.info(f"Successfully connected to IMAP: {self.imap_server}")
             return True
@@ -107,11 +146,16 @@ class EmailReader:
             
             results = []
             for e_id in email_ids:
-                # Ensure e_id is string
-                uid_str = e_id.decode() if isinstance(e_id, bytes) else str(e_id)
+                # Ensure e_id is string and safe for IMAP (ASCII only)
+                uid_str = safe_encode_uid(e_id)
                 
                 # 使用 BODY.PEEK[HEADER.FIELDS] 仅拉取头部，极大提升速度，避免阻塞
-                status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
+                try:
+                    status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
+                except UnicodeEncodeError:
+                    logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {e_id}")
+                    uid_str = safe_encode_uid(e_id)
+                    status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
                 if status != 'OK' or not msg_data or msg_data[0] is None:
                     continue
                 
@@ -153,12 +197,17 @@ class EmailReader:
             logger.error(f"无法选择文件夹: {folder}")
             return []
 
-        # Ensure msg_id is string (Protocol UID Type)
-        uid_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+        # Ensure msg_id is string and safe for IMAP (ASCII only)
+        uid_str = safe_encode_uid(msg_id)
 
         try:
             # Use UID FETCH
-            status, msg_data = self.mail.uid('fetch', uid_str, '(RFC822)')
+            try:
+                status, msg_data = self.mail.uid('fetch', uid_str, '(RFC822)')
+            except UnicodeEncodeError:
+                logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {msg_id}")
+                uid_str = safe_encode_uid(msg_id)
+                status, msg_data = self.mail.uid('fetch', uid_str, '(RFC822)')
             if status != 'OK':
                 logger.error(f"UID Fetch failed for {uid_str}: {status}")
                 return []
@@ -210,7 +259,20 @@ class EmailReader:
         Fetch full content of an email by ID.
         统一返回结构，确保即使失败也包含 body 键，防止 'NoneType' object is not subscriptable 错误。
         使用 BODY.PEEK[] 获取正文，避免意外改变邮件未读状态。
+        每一步操作前都检查全局 stop_event。
         """
+        stop_event = get_stop_event()
+        
+        # 基础工具保险：在最开始添加健壮性检查
+        if not msg_id or not isinstance(msg_id, (str, bytes)):
+            logger.error("接收到的邮件 ID 无效或为空")
+            # 统一返回结构，确保即使失败也包含所有必需键
+            return {"id": str(msg_id) if msg_id else "", "subject": "", "from": "", "body": "", "date": "", "error": "Invalid Email ID"}
+        
+        # 检查停止事件
+        if stop_event.is_set():
+            raise RuntimeError("任务已停止")
+        
         # 统一返回结构，确保即使失败也包含所有必需键
         res = {"id": msg_id, "subject": "", "from": "", "body": "", "date": "", "error": None}
         
@@ -218,30 +280,71 @@ class EmailReader:
             res["error"] = "Connection error"
             return res
 
+        # 检查停止事件
+        if stop_event.is_set():
+            raise RuntimeError("任务已停止")
+
         if not self._select_mailbox(folder):
             res["error"] = "Mailbox selection failed"
             return res
 
-        # Ensure msg_id is string
-        uid_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+        # 检查停止事件
+        if stop_event.is_set():
+            raise RuntimeError("任务已停止")
+
+        # Ensure msg_id is string and safe for IMAP (ASCII only)
+        uid_str = safe_encode_uid(msg_id)
 
         try:
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
+            
             # 使用 BODY.PEEK[] 获取正文，避免意外改变邮件未读状态
-            status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[])')
+            # 设置超时时间为 10 秒
+            if self.mail.sock:
+                self.mail.sock.settimeout(10)
+            try:
+                status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[])')
+            except UnicodeEncodeError:
+                logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {msg_id}")
+                uid_str = safe_encode_uid(msg_id)
+                status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[])')
+            
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
+            
             if status != 'OK' or not msg_data:
                 res["error"] = f"Failed to fetch content for {uid_str}: {status}"
                 return res
 
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
+
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
+            
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
             
             subject = self._decode_mime_header(msg.get("Subject", ""))
             sender = self._decode_mime_header(msg.get("From", ""))
             date = msg.get("Date", "")
             
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
+            
             body = ""
             if msg.is_multipart():
                 for part in msg.walk():
+                    # 检查停止事件
+                    if stop_event.is_set():
+                        raise RuntimeError("任务已停止")
+                    
                     content_type = part.get_content_type()
                     content_disposition = str(part.get("Content-Disposition", ""))
                     if content_type == "text/plain" and "attachment" not in content_disposition:
@@ -249,8 +352,16 @@ class EmailReader:
                         body = payload.decode(errors='ignore') if payload else ""
                         break
             else:
+                # 检查停止事件
+                if stop_event.is_set():
+                    raise RuntimeError("任务已停止")
+                
                 payload = msg.get_payload(decode=True)
                 body = payload.decode(errors='ignore') if payload else ""
+            
+            # 检查停止事件
+            if stop_event.is_set():
+                raise RuntimeError("任务已停止")
             
             res.update({
                 "subject": subject,
@@ -259,6 +370,12 @@ class EmailReader:
                 "date": date
             })
             return res
+        except RuntimeError as e:
+            if "任务已停止" in str(e):
+                logger.info("任务已停止，中断邮件获取")
+                res["error"] = "任务已停止"
+                return res
+            raise
         except Exception as e:
             logger.error(f"Error fetching email content: {e}")
             res["error"] = str(e)
@@ -273,20 +390,35 @@ class EmailReader:
             logger.error(f"无法选择文件夹: {current_folder}")
             return False
 
-        # Ensure msg_id is string
-        uid_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+        # Ensure msg_id is string and safe for IMAP (ASCII only)
+        uid_str = safe_encode_uid(msg_id)
 
         try:
             if action == "mark_read":
                 # Use UID STORE
-                self.mail.uid('store', uid_str, '+FLAGS', '\\Seen')
+                try:
+                    self.mail.uid('store', uid_str, '+FLAGS', '\\Seen')
+                except UnicodeEncodeError:
+                    logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {msg_id}")
+                    uid_str = safe_encode_uid(msg_id)
+                    self.mail.uid('store', uid_str, '+FLAGS', '\\Seen')
                 return True
             elif action == "move" and target_folder:
                 # Use UID COPY
-                result = self.mail.uid('copy', uid_str, target_folder)
+                try:
+                    result = self.mail.uid('copy', uid_str, target_folder)
+                except UnicodeEncodeError:
+                    logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {msg_id}")
+                    uid_str = safe_encode_uid(msg_id)
+                    result = self.mail.uid('copy', uid_str, target_folder)
                 if result[0] == 'OK':
                     # Use UID STORE for deletion
-                    self.mail.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                    try:
+                        self.mail.uid('store', uid_str, '+FLAGS', '\\Deleted')
+                    except UnicodeEncodeError:
+                        logger.warning(f"邮件ID包含非ASCII字符，已自动清理: {msg_id}")
+                        uid_str = safe_encode_uid(msg_id)
+                        self.mail.uid('store', uid_str, '+FLAGS', '\\Deleted')
                     self.mail.expunge()
                     return True
             return False

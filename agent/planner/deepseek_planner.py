@@ -100,7 +100,16 @@ class DeepSeekPlanner(BasePlanner):
                 {"role": "user", "content": prompt},
             ]
 
-            response = call_llm(messages)
+            # 使用异步包装器调用 LLM（非阻塞）
+            try:
+                from agent.tools.async_wrapper import get_async_wrapper
+                wrapper = get_async_wrapper()
+                logger.info("[SECURITY_SHIELD] 使用异步包装器调用 DeepSeek API（非阻塞）")
+                response = wrapper.call_async(call_llm, messages, timeout=60.0)  # 60秒超时
+            except Exception as e:
+                logger.warning(f"[SECURITY_SHIELD] 异步调用失败，降级到同步调用: {e}")
+                # 降级到同步调用
+                response = call_llm(messages)
             content = response.choices[0].message.content or ""
             logger.warning("🔵 正在调用DeepSeek API规划任务...")
             logger.warning(f"🔵 DeepSeek原始响应（前2000字符）: {content[:2000]}...")
@@ -410,10 +419,25 @@ class DeepSeekPlanner(BasePlanner):
 """
         
         # 按需精简 prompt
-        needs_browser = any(kw in instruction for kw in [
-            "网页", "网站", "浏览", "搜索", "下载", "http", "www",
-            "百度", "谷歌", "google", "访问", "登录",
-        ])
+        # 扩展浏览器关键词，确保能识别更多网页操作场景
+        # 注意：如果只是"截图桌面"（不涉及网页），不应该触发浏览器工具
+        instruction_lower = instruction.lower()
+        is_desktop_screenshot_only = (
+            "截图桌面" in instruction or "桌面截图" in instruction
+        ) and not any(kw in instruction for kw in ["网页", "网站", "页面", "官网", "http", "https", "www"])
+        
+        needs_browser = (
+            not is_desktop_screenshot_only and any(kw in instruction_lower for kw in [
+                "网页", "网站", "浏览", "搜索", "下载", "http", "https", "www",
+                "百度", "谷歌", "google", "访问", "登录", "github", "github",
+                "截图", "页面截图", "网页截图", "网站截图",  # 网页截图应该用 browser_screenshot
+                "官网", "首页", "页面", "网址", "url", "链接",
+                "bing", "yahoo", "safari", "chrome", "edge", "firefox",  # 浏览器名称
+            ])
+        ) or any(site_name in instruction_lower for site_name in [
+            "github", "stackoverflow", "知乎", "微博", "twitter", "facebook",
+            "youtube", "bilibili", "淘宝", "京东", "亚马逊", "amazon",
+        ])  # 常见网站名称，直接触发浏览器工具
         needs_word = any(kw in instruction.lower() for kw in [
             "word", "docx", ".docx", "替换文字", "替换文档",
         ])
@@ -548,12 +572,30 @@ class DeepSeekPlanner(BasePlanner):
   - **⚠️ 重要约束**：
     - **禁止使用 Base64 编码**：script 参数必须是直接的 Python 源码字符串，不要进行 Base64 编码
     - **处理非ASCII字符**：如果脚本中包含中文等非ASCII字符，请使用以下方式之一：
-      1. 使用原始字符串：`r"中文内容"` 或 `"""中文内容"""`
+      1. 使用原始字符串：`r"中文内容"` 或使用三引号字符串（注意转义）
       2. 使用 json.dumps()：`json.dumps("中文内容", ensure_ascii=False)`
       3. 将中文字符串赋值给变量：`title = "验证码邮件"`，然后在代码中使用变量
+    - **字符串引号使用**：如果 Python 脚本中包含字符串，请优先使用单引号，或使用三引号（三个单引号或三个双引号），或使用 JSON 的双引号结构。这样可以避免与 JSON 格式的双引号冲突，减少转义问题。
     - **邮件标题处理**：处理邮件标题时，直接使用 Python 原始字符串，不要进行复杂的编码或 Base64 包装
     - **示例（正确）**：`{{"script": "import json\\nprint(json.dumps('验证码', ensure_ascii=False))"}}`
     - **示例（错误）**：`{{"script": "aW1wb3J0IGpzb24="}}`（Base64 编码，禁止使用）
+  - **🚫 严禁格式数据（极其重要！）**：
+    - **绝对禁止手动定义 step1_result 或任何模拟的邮件数据**：在 execute_python_script 的脚本中，严禁手动定义类似 `step1_result = dict(emails=[...])` 或 `mail_data = [dict(id="123", subject="测试")]` 这样的模拟数据
+    - **强制使用真实数据**：系统会自动将上一步的结果注入到脚本的 `context_data` 变量中。脚本必须通过 `import json; context_data = json.loads(context_data)` 来获取真实数据，然后从 `context_data` 中提取上一步的结果
+    - **正确示例**：
+      ```python
+      import json
+      context_data = json.loads(context_data)  # context_data 是系统自动注入的字符串
+      step1_result = context_data.get('step_results', [])[0].get('result', dict()).get('data', dict())
+      emails = step1_result.get('emails', [])
+      ```
+    - **错误示例（禁止！）**：
+      ```python
+      # ❌ 禁止：手动定义模拟数据
+      step1_result = dict(emails=[dict(id="123", subject="测试")])
+      # ❌ 禁止：使用占位符但手动填充数据
+      mail_data = step1.result  # 这是占位符语法，但不要在脚本中手动定义
+      ```
 {browser_section}
 **系统控制工具**：
 - set_volume: 设置音量 → params: {{"level": 0-100}} 或 {{"action": "mute/unmute/up/down"}}
@@ -567,8 +609,9 @@ class DeepSeekPlanner(BasePlanner):
 - search_emails: 搜索邮件 → params: {{"query": "IMAP查询(如ALL)", "folder": "文件夹(可选)", "limit": 10(可选), "keyword_filter": "关键词(可选)"}}
   - **重要**: query 必须包含 IMAP 语法（如 `ALL`, `(FROM "xxx")`, `(SUBJECT "xxx")`, `UNSEEN`）。
   - **keyword_filter**: 可选的关键词过滤，在邮件主题或发件人中搜索（不区分大小写）。
-    - 示例：`{{"query": "ALL", "limit": 10, "keyword_filter": "验证码"}}` - 搜索所有邮件，然后过滤包含"验证码"的
+    - 示例：`{{"query": "ALL", "limit": 50, "keyword_filter": "验证码"}}` - 搜索所有邮件，然后过滤包含"验证码"的
     - **推荐使用**: 对于简单的标题过滤，优先使用 `keyword_filter` 参数，避免编写 Python 脚本，减少乱码风险
+    - **⚠️ 重要约束**: 如果在执行 search_emails 时使用了 keyword_filter，请务必将 limit 设置为至少 50，以确保搜索范围足够大，避免因搜索范围过小而导致过滤后结果为空
 - get_email_details: 获取邮件详情 → params: {{"id": "邮件ID", "folder": "文件夹(可选)"}}
 - download_attachments: 下载邮件附件 → params: {{"id": "邮件ID", "save_dir": "保存目录", "file_type": "后缀名(如pdf, 可选)", "limit": 数量(可选), "folder": "文件夹(可选)"}}
 - manage_emails: 管理邮件 → params: {{"id": "邮件ID", "action": "move/mark_read", "target_folder": "目标文件夹(如果是move)"}}
@@ -639,7 +682,7 @@ class DeepSeekPlanner(BasePlanner):
 10. **系统通知必须用 send_notification 工具**，不要用脚本！
 
 **Python脚本执行**（复杂任务或工具无法满足时使用）：
-- script: Python代码，**必须使用 base64 编码**（避免JSON转义问题）
+- script: Python代码，**必须直接使用明文**（不要使用 Base64 编码，现代 AI 模型对明文代码的 JSON 处理能力很强）
 - reason: 为什么使用脚本而不是工具
 - safety: 安全检查说明
 - **脚本要求**：
@@ -651,6 +694,7 @@ class DeepSeekPlanner(BasePlanner):
     - 常见必修点：只 import 你真正用到的（避免 F401），不要引用未定义变量（F821），不要 `except:`（E722），确保没有语法错误（E999），`raise` 保留异常链（B904）
   * 输出格式：`print(json.dumps({{"success": True 或 False, "message": "...", "data": {{...}}}}))`
   * Python布尔值：使用 `True`/`False`（首字母大写），不是 `true`/`false`
+  * **字符串引号使用**：如果脚本中包含字符串，请优先使用单引号，或使用三引号（三个单引号或三个双引号），或使用 JSON 的双引号结构。这样可以避免与 JSON 格式的双引号冲突，减少转义问题。
   * 浏览器操作：使用 `playwright.sync_api` 模块
   * 文件操作：使用 `os`, `shutil`, `pathlib` 模块
   * **HTTP 请求（重要！）**：
@@ -724,7 +768,23 @@ class DeepSeekPlanner(BasePlanner):
 - 支持 ~ 符号（如 "~/Desktop"）
 
 **重要规则**：
-- **桌面截图任务**：如果用户说"截图桌面"、"桌面截图"、"保存到桌面"等，**必须使用 screenshot_desktop 工具**，并且**如果用户要求保存到桌面，必须传递 save_path 参数**：
+- **🚫 网页操作禁止使用 open_app + screenshot_desktop**：
+  * **如果用户要求访问网站、截图网页、搜索网页内容**，必须使用 `browser_navigate` + `browser_screenshot`，**绝对禁止**使用 `open_app` 打开浏览器应用程序
+  * **重要：浏览器工具会自动在后台启动**：
+    - `browser_navigate`、`browser_screenshot` 等浏览器工具**会自动在后台启动独立的headless浏览器实例**
+    - **不需要**使用 `open_app` 打开 Safari、Chrome 等浏览器应用程序
+    - 浏览器操作完全在后台进行，不会打开可见的浏览器窗口
+    - 系统会自动管理浏览器的启动和关闭，无需手动操作
+  * **浏览器操作流程**：
+    1. 直接使用 `browser_navigate` 导航到网站（如 "https://github.com"），系统会自动在后台启动浏览器
+    2. 如果需要截图网页，使用 `browser_screenshot`（不是 `screenshot_desktop`）
+    3. 如果需要点击、填写表单等，使用 `browser_click`、`browser_fill` 等浏览器工具
+  * **错误示例（禁止！）**：
+    - ❌ `open_app(app_name="Safari")` + `screenshot_desktop` → 这是错误的！会打开可见的浏览器窗口
+    - ❌ `open_app(app_name="浏览器")` + `browser_navigate` → 这是错误的！不需要打开应用
+    - ✅ `browser_navigate(url="https://github.com")` + `browser_screenshot(save_path="~/Desktop/github.png")` → 这是正确的！完全后台操作
+  * **判断标准**：如果用户提到"网站"、"网页"、"访问"、"搜索"（网页搜索）、"GitHub"、"百度"等网站名称，必须使用浏览器工具，**且不要使用 open_app**
+- **桌面截图任务**：如果用户说"截图桌面"、"桌面截图"、"保存到桌面"等（**不涉及网页**），**必须使用 screenshot_desktop 工具**，并且**如果用户要求保存到桌面，必须传递 save_path 参数**：
   * 如果用户说"保存到桌面"或"保存桌面"：传递 `"save_path": "~/Desktop/screenshot.png"`（必须包含文件名和 .png 后缀，不要只传目录）
   * 如果用户只说"截图桌面"但没有说保存位置：可以省略 save_path（使用默认位置）
 - **只执行用户明确要求的操作**：如果用户说"截图桌面"，就只截图，不要删除文件、移动文件或其他操作
@@ -834,12 +894,15 @@ class DeepSeekPlanner(BasePlanner):
 
 **重要**：
 - 只输出JSON数组，不要添加其他文字
-- 如果使用 execute_python_script，script字段必须使用 base64 编码
+- 如果使用 execute_python_script，script字段必须直接使用明文 Python 代码（不要使用 Base64 编码）
 - JSON格式必须严格正确，可以被Python的json.loads()解析
 - **理解自然语言**：仔细分析用户指令，正确拆分多个操作
+- **处理非ASCII字符**：如果脚本中包含中文等非ASCII字符，使用原始字符串（r""）或 json.dumps()，不要使用 Base64
+- **字符串引号使用**：如果 Python 脚本中包含字符串，请优先使用单引号，或使用三引号（三个单引号或三个双引号），或使用 JSON 的双引号结构。这样可以避免与 JSON 格式的双引号冲突，减少转义问题。
+- **⚠️ 引用上一步结果时禁止使用中文描述**：在参数中引用上一步结果时，禁止使用任何中文描述或自然语言！必须且只能使用 {{stepN.path}} 语法。例如，获取第一封邮件ID必须写成 {{step1.result[0].id}} 或 {{step1.data.emails[0].id}}，绝对禁止写成"第一个邮件的ID"、"第一封邮件"、"上一步的ID"等中文描述。如果违反此规则，系统将无法识别并报错。
 
 
-**关键**：script 字段必须是 base64 编码的完整 Python 代码！"""
+**关键**：script 字段必须是明文的完整 Python 代码，不要使用 Base64 编码！现代 DeepSeek-Chat 对明文代码的 JSON 处理能力很强，Base64 反而会增加解析和生成的负载。"""
         
         return prompt
     

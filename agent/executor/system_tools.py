@@ -19,11 +19,12 @@ from agent.tools.config import Config
 from agent.executor.code_interpreter import CodeInterpreter
 from agent.executor.document_processor import DocumentProcessor
 from agent.executor.ocr_helper import OCRHelper
+from agent.executor.base_executor import BaseExecutor
 
 logger = logging.getLogger(__name__)
 
 
-class SystemTools:
+class SystemTools(BaseExecutor):
     """
     系统工具：执行系统级操作
     
@@ -40,8 +41,7 @@ class SystemTools:
             config: 配置对象
             emit_callback: 进度回调函数
         """
-        self.config = config
-        self.emit = emit_callback
+        super().__init__(config, emit_callback)
         self.sandbox_path = Path(config.sandbox_path).resolve()
         self.sandbox_path.mkdir(parents=True, exist_ok=True)
         
@@ -142,11 +142,10 @@ class SystemTools:
         Returns:
             执行结果
         """
+        self._log_execution_start(step)
         step_type = step.get("type")
         action = step.get("action", "")
         params = step.get("params", {})
-        
-        logger.info(f"执行系统操作: {step_type} - {action}")
         
         try:
             if step_type == "screenshot_desktop":
@@ -162,7 +161,7 @@ class SystemTools:
             elif step_type == "close_app":
                 return self._close_app(params)
             elif step_type == "execute_python_script":
-                return self._execute_python_script(params)
+                return self._execute_python_script(params, context)
             # ========== 新增系统控制功能 ==========
             elif step_type == "set_volume":
                 return self._set_volume(params)
@@ -1092,6 +1091,24 @@ class SystemTools:
         if not app_name:
             raise BrowserError("缺少app_name参数")
         
+        # === 新增：类型检查守卫（最后防线）===
+        # 检查是否包含文件路径特征，防止误将文件路径当作应用名称
+        file_path_indicators = ['/', '\\', '.txt', '.jpg', '.png', '.pdf', '.docx', '.py', 
+                               '.mp4', '.zip', '.rar', '~/', 'Desktop/', 'Downloads/']
+        
+        if any(indicator in str(app_name) for indicator in file_path_indicators):
+            error_msg = f"拒绝执行：'{app_name}' 看起来像是一个文件路径，而不是应用程序名称。请检查您的指令是否为'删除文件'或'文件操作'。"
+            logger.error(f"[SystemTools] {error_msg}")
+            raise ValueError(error_msg)
+        
+        # 检查是否包含明显的文件操作关键词
+        file_keywords = ['删除', '删除文件', '删除图片', '删除文档', 'file', '文件', '图片', '文档']
+        app_name_lower = str(app_name).lower()
+        if any(kw in app_name_lower for kw in file_keywords):
+            error_msg = f"拒绝执行：'{app_name}' 包含文件操作关键词，这可能是意图路由错误。请使用文件操作工具（file_delete）而不是关闭应用。"
+            logger.error(f"[SystemTools] {error_msg}")
+            raise ValueError(error_msg)
+        
         platform = sys.platform
         
         try:
@@ -1223,7 +1240,7 @@ class SystemTools:
             logger.error(f"关闭应用程序失败: {e}", exc_info=True)
             raise BrowserError(f"关闭应用程序失败: {e}")
     
-    def _execute_python_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_python_script(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行Python脚本 - 增强版（使用 CodeInterpreter）
         
@@ -1232,9 +1249,11 @@ class SystemTools:
         - Matplotlib 图表自动保存
         - 智能错误修复和自动重试
         - 代码执行结果记忆
+        - 自动注入上下文数据（context_data）
         
         Args:
             params: 包含script（Python脚本代码，必需）、reason（原因，可选）、safety（安全检查说明，可选）
+            context: 执行上下文，包含 step_results 等信息，会自动注入到脚本中
         
         Returns:
             执行结果，包含success、message、data、images等
@@ -1265,13 +1284,14 @@ class SystemTools:
             logger.warning("⚠️ 检测到脚本可能是 Base64 编码，建议 Planner 直接使用 Python 源码，避免 Base64 包装")
             logger.warning("💡 提示：对于包含中文的字符串，使用 json.dumps() 或原始字符串（r''）处理，不要使用 Base64")
         
-        # 使用增强版代码解释器执行
+        # 使用增强版代码解释器执行（传递 context 以便注入 context_data）
         try:
             result = self.code_interpreter.execute(
                 code=script,
                 reason=reason,
                 auto_install=auto_install,
-                max_retries=max_retries
+                max_retries=max_retries,
+                context=context
             )
             
             # 构建返回结果

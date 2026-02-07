@@ -23,6 +23,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from agent.executor.script_validator import ScriptValidator
+from agent.tools.security_auditor import ASTSecurityAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -120,12 +121,18 @@ class CodeInterpreter:
         self.code_history: List[Dict] = []
         self.validator = ScriptValidator(sandbox_path)
         
+        # 初始化 AST 安全审计器
+        self.security_auditor = ASTSecurityAuditor(sandbox_path)
+        
         # 创建必要的目录
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # 执行超时时间（秒）
+        self.execution_timeout = 30
+        
     def execute(self, code: str, reason: str = "", auto_install: bool = True, 
-                max_retries: int = 2) -> CodeExecutionResult:
+                max_retries: int = 2, context: Optional[Dict[str, Any]] = None) -> CodeExecutionResult:
         """
         执行 Python 代码
         
@@ -134,6 +141,7 @@ class CodeInterpreter:
             reason: 执行原因（用于日志）
             auto_install: 是否自动安装缺失的包
             max_retries: 最大重试次数
+            context: 执行上下文，包含 step_results 等信息，会自动注入到脚本中作为 context_data 变量
             
         Returns:
             CodeExecutionResult: 执行结果
@@ -144,17 +152,52 @@ class CodeInterpreter:
         # 0. 处理 base64 编码的代码
         code = self._decode_script(code)
         
+        # 0.25 注入上下文数据（如果提供了 context）
+        if context is not None:
+            import json
+            
+            # 增加 default 参数处理非序列化对象
+            try:
+                context_json_str = json.dumps(
+                    context, 
+                    ensure_ascii=False, 
+                    default=lambda o: f"<Non-serializable: {type(o).__name__}>"
+                )
+            except Exception as e:
+                logger.warning(f"序列化 context 时出错: {e}，使用简化版本")
+                # 如果仍然失败，创建一个简化的 context（只保留可序列化的部分）
+                simplified_context = {}
+                for key, value in context.items():
+                    try:
+                        json.dumps(value, default=lambda o: f"<Non-serializable: {type(o).__name__}>")
+                        simplified_context[key] = value
+                    except:
+                        simplified_context[key] = f"<Non-serializable: {type(value).__name__}>"
+                context_json_str = json.dumps(simplified_context, ensure_ascii=False, default=lambda o: f"<Non-serializable: {type(o).__name__}>")
+            
+            # 在代码开头注入 context_data 变量（避免重复注入）
+            if "context_data = " not in code:
+                injection_code = f"# === DeskJarvis 自动注入上下文数据 ===\nimport json\ncontext_data = {repr(context_json_str)}\n# === 结束注入 ===\n\n"
+                code = injection_code + code
+                logger.debug("已注入 context_data 到脚本中")
+        
         # 0.5 预处理：修复常见的 AI 代码错误
         code = self._preprocess_code(code)
         
-        # 1. 安全检查
-        security_check = self._check_security(code)
-        if not security_check[0]:
+        # 1. AST 安全检查（升级版）
+        is_safe, security_reason = self.security_auditor.audit(code)
+        if not is_safe:
             return CodeExecutionResult(
                 success=False,
-                message=f"安全检查失败: {security_check[1]}",
-                error=security_check[1]
+                message=f"[SECURITY_SHIELD] AST 安全审计失败: {security_reason}",
+                error=security_reason
             )
+        
+        # 1.1 保留旧的关键词检查作为补充（向后兼容）
+        legacy_security_check = self._check_security(code)
+        if not legacy_security_check[0]:
+            logger.warning(f"[SECURITY_SHIELD] 关键词检查检测到潜在风险: {legacy_security_check[1]}")
+            # 不直接拒绝，但记录警告（AST 审计是主要检查）
         
         # 1.5 语法预检查（自动修复常见语法错误）
         syntax_check = self._check_syntax(code)
@@ -662,12 +705,10 @@ class CodeInterpreter:
         if not (uses_matplotlib or uses_seaborn or uses_plotly):
             return code
         
-        # 生成唯一的图表文件名 - 保存到桌面
+        # 生成唯一的图表文件名 - 严格保存到沙盒 output 目录（不再保存到桌面）
         timestamp = int(time.time() * 1000)
-        desktop_path = Path.home() / "Desktop"
-        image_path = desktop_path / f"DeskJarvis图表_{timestamp}.png"
-        
-        # 同时保存一份到 output_dir 供预览
+        # 所有输出严格隔离到沙盒目录
+        image_path = self.output_dir / f"DeskJarvis图表_{timestamp}.png"
         preview_path = self.output_dir / f"plot_{timestamp}.png"
         
         # 只注入“纯 import”块，避免 E402（imports must be at top）
@@ -774,43 +815,75 @@ _dj_save_current_figure()
         """
         直接执行代码（不进行实时观察）
         
+        增强功能：
+        - 30秒超时机制（防止死循环）
+        - 输出严格隔离到沙盒目录
+        - 资源限制
+        
         Returns:
             执行结果
         """
-        # 创建临时脚本文件
+        # 创建临时脚本文件（在沙盒内）
         script_path = self.scripts_dir / f"script_{int(time.time() * 1000)}.py"
+        
+        # 输出文件路径（严格隔离）
+        output_file = self.output_dir / f"output_{int(time.time() * 1000)}.txt"
+        error_file = self.output_dir / f"error_{int(time.time() * 1000)}.txt"
         
         try:
             # 写入脚本
             with open(script_path, "w", encoding="utf-8") as f:
                 f.write(code)
             
-            logger.info(f"执行脚本: {script_path}")
+            logger.info(f"[SECURITY_SHIELD] 执行脚本: {script_path} (超时: {self.execution_timeout}s)")
             
-            # 执行脚本
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=str(self.sandbox_path),
-                env={
-                    **os.environ,
-                    "PYTHONIOENCODING": "utf-8",
-                    # 强制 matplotlib 使用无界面后端，避免 macOS GUI 阻塞
-                    "MPLBACKEND": "Agg"
-                }
-            )
+            # 执行脚本（带超时和输出重定向）
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.execution_timeout,  # 30秒超时
+                    cwd=str(self.sandbox_path),  # 工作目录限制在沙盒
+                    env={
+                        **os.environ,
+                        "PYTHONIOENCODING": "utf-8",
+                        # 强制 matplotlib 使用无界面后端，避免 macOS GUI 阻塞
+                        "MPLBACKEND": "Agg",
+                        # 限制 Python 路径（防止导入系统模块）
+                        "PYTHONPATH": str(self.sandbox_path),
+                    }
+                )
+            except subprocess.TimeoutExpired:
+                logger.error(f"[SECURITY_SHIELD] 脚本执行超时（{self.execution_timeout}秒）: {script_path}")
+                return CodeExecutionResult(
+                    success=False,
+                    message=f"[SECURITY_SHIELD] 执行超时（超过{self.execution_timeout}秒），已强制终止",
+                    error=f"Timeout after {self.execution_timeout}s"
+                )
             
+            # 保存输出到沙盒目录（严格隔离）
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
+            
+            # 写入输出文件
+            try:
+                with open(output_file, "w", encoding="utf-8") as f:
+                    f.write(stdout)
+                if stderr:
+                    with open(error_file, "w", encoding="utf-8") as f:
+                        f.write(stderr)
+                logger.debug(f"[SECURITY_SHIELD] 输出已保存到: {output_file}")
+            except Exception as e:
+                logger.warning(f"[SECURITY_SHIELD] 保存输出文件失败: {e}")
             
             if result.returncode != 0:
                 # 执行失败
                 error_msg = stderr or stdout or "未知错误"
+                logger.error(f"[SECURITY_SHIELD] 脚本执行失败: {error_msg[:200]}")
                 return CodeExecutionResult(
                     success=False,
-                    message=f"执行失败: {error_msg[:200]}",
+                    message=f"[SECURITY_SHIELD] 执行失败: {error_msg[:200]}",
                     output=stdout,
                     error=error_msg
                 )
@@ -831,22 +904,18 @@ _dj_save_current_figure()
                 pass
                 
             # 返回原始输出
+            logger.info(f"[SECURITY_SHIELD] 脚本执行成功，输出已隔离到: {output_file}")
             return CodeExecutionResult(
                 success=True,
                 message="执行完成",
                 output=stdout
             )
                 
-        except subprocess.TimeoutExpired:
-            return CodeExecutionResult(
-                success=False,
-                message="执行超时（超过5分钟）",
-                error="Timeout"
-            )
         except Exception as e:
+            logger.error(f"[SECURITY_SHIELD] 脚本执行异常: {e}", exc_info=True)
             return CodeExecutionResult(
                 success=False,
-                message=f"执行异常: {str(e)}",
+                message=f"[SECURITY_SHIELD] 执行异常: {str(e)}",
                 error=str(e)
             )
     

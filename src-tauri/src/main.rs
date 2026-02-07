@@ -57,6 +57,7 @@ struct PythonServer {
 /// 应用全局状态（通过 Tauri .manage() 注入）
 struct AppState {
     server: Mutex<Option<PythonServer>>,
+    current_task_id: Mutex<Option<String>>,  // 当前正在执行的任务ID
 }
 
 /// 启动常驻 Python 服务进程
@@ -392,6 +393,12 @@ async fn execute_task(
             .as_millis()
     );
 
+    // 设置当前任务ID
+    {
+        let mut current_id = state.current_task_id.lock().await;
+        *current_id = Some(request_id.clone());
+    }
+
     // ---------- 尝试常驻进程模式 ----------
     {
         let mut guard = state.server.lock().await;
@@ -404,26 +411,107 @@ async fn execute_task(
         }
 
         let server = guard.as_mut().unwrap();
-        match execute_via_server(&window, server, &instruction, &context, &request_id).await {
-            Ok(result) => return Ok(result),
+        let _result: Result<TaskResult, String> = match execute_via_server(&window, server, &instruction, &context, &request_id).await {
+            Ok(r) => {
+                // 清除当前任务ID
+                {
+                    let mut current_id = state.current_task_id.lock().await;
+                    *current_id = None;
+                }
+                return Ok(r);
+            },
             Err(ref e) if e == "PROCESS_CRASHED" => {
                 eprintln!("[Tauri] ⚠️ Python 服务在执行中崩溃");
                 *guard = None;
+                // 清除当前任务ID
+                {
+                    let mut current_id = state.current_task_id.lock().await;
+                    *current_id = None;
+                }
                 // 后台静默重启
                 spawn_background_restart(window.app_handle().clone());
+                Err(e.clone())
             }
             Err(e) => {
                 eprintln!("[Tauri] ⚠️ 常驻进程执行失败: {}", e);
                 // 可能是 stdin 写入失败等，标记需要重启
                 *guard = None;
+                // 清除当前任务ID
+                {
+                    let mut current_id = state.current_task_id.lock().await;
+                    *current_id = None;
+                }
                 spawn_background_restart(window.app_handle().clone());
+                Err(e)
             }
+        };
+        
+        // 清除当前任务ID（如果执行失败）
+        {
+            let mut current_id = state.current_task_id.lock().await;
+            *current_id = None;
         }
+        
+        // 继续降级处理
+        drop(guard);
     }
 
     // ---------- 降级为单次进程模式 ----------
     eprintln!("[Tauri] 🔄 降级为单次进程模式执行");
-    execute_oneshot(&window, &instruction, &context).await
+    let result = execute_oneshot(&window, &instruction, &context).await;
+    
+    // 清除当前任务ID
+    {
+        let mut current_id = state.current_task_id.lock().await;
+        *current_id = None;
+    }
+    
+    result
+}
+
+/// 停止当前正在执行的任务
+#[tauri::command]
+async fn stop_task(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // 获取当前任务ID
+    let current_id = {
+        let current_id = state.current_task_id.lock().await;
+        current_id.clone()
+    };
+    
+    if let Some(task_id) = current_id {
+        eprintln!("[Tauri] 🛑 停止任务: {}", task_id);
+        
+        // 通过常驻进程发送停止命令
+        let mut guard = state.server.lock().await;
+        if let Some(server) = guard.as_mut() {
+            let cmd = serde_json::json!({
+                "cmd": "stop",
+                "id": task_id,
+            });
+            let cmd_line = cmd.to_string() + "\n";
+            
+            if let Err(e) = server.stdin.write_all(cmd_line.as_bytes()).await {
+                eprintln!("[Tauri] ⚠️ 发送停止命令失败: {}", e);
+                return Err(format!("发送停止命令失败: {}", e));
+            }
+            
+            if let Err(e) = server.stdin.flush().await {
+                eprintln!("[Tauri] ⚠️ 刷新停止命令失败: {}", e);
+                return Err(format!("刷新停止命令失败: {}", e));
+            }
+            
+            eprintln!("[Tauri] ✅ 停止命令已发送");
+            Ok(())
+        } else {
+            eprintln!("[Tauri] ⚠️ Python 服务未运行，无法发送停止命令");
+            Err("Python 服务未运行".to_string())
+        }
+    } else {
+        eprintln!("[Tauri] ⚠️ 没有正在执行的任务");
+        Err("没有正在执行的任务".to_string())
+    }
 }
 
 // ==================== 工具函数 ====================
@@ -679,6 +767,7 @@ fn main() {
         // 注入全局状态
         .manage(AppState {
             server: Mutex::new(None),
+            current_task_id: Mutex::new(None),
         })
         .setup(|app| {
             // ========== 后台启动常驻 Python 服务 ==========
@@ -764,6 +853,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             execute_task,
+            stop_task,
             get_config,
             save_config,
             open_file,

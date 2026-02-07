@@ -4,6 +4,8 @@
 遵循 docs/DEVELOPMENT.md 中的错误处理规范
 """
 
+from typing import Dict, Any
+
 
 class DeskJarvisError(Exception):
     """
@@ -51,3 +53,21 @@ class PlannerError(DeskJarvisError):
 class ConfigError(DeskJarvisError):
     """配置错误"""
     pass
+
+
+class PlaceholderError(DeskJarvisError):
+    """
+    占位符错误：当占位符替换失败（NULL_ID）时抛出
+    
+    用于触发 Reflector 重新分析上下文，而不是直接执行失败的操作。
+    """
+    def __init__(self, message: str, placeholder: str = "", step: Dict[str, Any] = None):
+        """
+        Args:
+            message: 错误消息
+            placeholder: 失败的占位符（如 "{{step1.id}}"）
+            step: 相关的步骤信息
+        """
+        super().__init__(message)
+        self.placeholder = placeholder
+        self.step = step

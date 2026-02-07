@@ -81,6 +81,22 @@ export async function executeTask(instruction: string, context?: any): Promise<a
 }
 
 /**
+ * 停止当前正在执行的任务
+ */
+export async function stopTask(): Promise<void> {
+  if (isTauriEnvironment()) {
+    try {
+      await safeInvoke("stop_task");
+    } catch (error) {
+      console.error("停止任务失败:", error);
+      throw error;
+    }
+  } else {
+    console.warn("停止任务需要在Tauri桌面应用中运行");
+  }
+}
+
+/**
  * 获取配置
  * 
  * @returns 应用配置

@@ -56,6 +56,7 @@ class SharedEmbeddingModel:
             daemon=True
         )
         thread.start()
+        logger.info("[SECURITY_SHIELD] 嵌入模型后台预热已启动（非阻塞）")
     
     def _load_worker(self):
         """后台加载工作线程"""

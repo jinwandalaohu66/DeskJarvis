@@ -248,3 +248,28 @@ STREAMING_OBSERVATION_PLAN.md
 NEXT_FEATURES_PLAN.md
 TECHNICAL_DEFENSE.md
 PROJECT_REPORT.md
+
+# DeskJarvis specific
+# 配置文件（包含 API Key，不应提交）
+~/.deskjarvis/config.json
+config.json
+*.key
+*.pem
+
+# 用户数据目录（包含敏感信息）
+~/.deskjarvis/
+.deskjarvis/
+
+# 调试文件
+*.debug
+debug/
+*.log
+
+# 浏览器配置文件（包含 Cookie、Session）
+browser_profile/
+*.browser_profile
+
+# 临时文件
+sandbox/temp/
+sandbox/outputs/
+*.tmp

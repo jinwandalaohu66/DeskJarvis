@@ -81,7 +81,7 @@ class EmailExecutor:
             elif step_type == "search_emails":
                 return self._search_emails(params)
             elif step_type == "get_email_details":
-                return self._get_email_details(params)
+                return self._get_email_details(params, context)
             elif step_type == "download_attachments":
                 return self._download_attachments(params)
             elif step_type == "manage_emails":
@@ -259,6 +259,7 @@ class EmailExecutor:
             return False
             
         self.email_reader = EmailReader(imap_server, imap_port)
+        # 连接时已设置 timeout=10
         return self.email_reader.connect(sender_email, sender_password)
 
     def _search_emails(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -297,31 +298,130 @@ class EmailExecutor:
         #     pass
         
         filter_info = f"（关键词过滤: {keyword_filter}）" if keyword_filter else ""
+        
+        # 确保返回纯数据字典，不包含任何方法引用
+        # results 已经是 List[Dict[str, Any]]，每个字典包含 id, subject, from, date 等纯数据字段
         return {
             "success": True,
             "message": f"搜索到 {len(results)} 封邮件{filter_info}",
-            "data": {"emails": results}
+            "data": {"emails": results}  # results 是纯数据列表，不包含方法引用
         }
 
-    def _get_email_details(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_email_details(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """获取邮件详情"""
+        # 同步纠错：在入口处检查并修正中文或描述性ID
+        msg_id_raw = params.get("id", "")
+        msg_id_str = str(msg_id_raw).strip()
+        
+        # 检测中文或描述性文字
+        has_chinese = any('\u4e00' <= c <= '\u9fff' for c in msg_id_str)
+        has_descriptive = "ID" in msg_id_str.upper() or "邮件" in msg_id_str or "第一个" in msg_id_str or "上一步" in msg_id_str
+        
+        # 如果包含中文或描述性文字，且不是占位符格式，进行自动修正
+        if (has_chinese or has_descriptive) and not msg_id_str.startswith("{{"):
+            logger.warning(f"🔧 AI语法自动修改：检测到中文或描述性ID '{msg_id_str}'，自动修正为标准占位符")
+            # 强制重置为标准占位符（假设第一步总是搜索）
+            params['id'] = "{{step1.result[0].id}}"
+            msg_id_raw = params.get("id")
+            logger.info("已自动修正为: {{step1.result[0].id}}")
+        
+        # 统一ID提取逻辑：使用 params.get('id') 而不是 params['id']
+        id_raw = params.get("id")
+        
+        # 防御字典解析：如果 id 是一个字典（比如上一阶段返回的完整对象），使用 id.get('id') 提取字符串
+        # 如果 id 是字符串，直接使用
+        if isinstance(id_raw, dict):
+            msg_id = id_raw.get("id")
+            logger.info(f"从字典中提取邮件ID: {msg_id}")
+        elif isinstance(id_raw, list) and len(id_raw) > 0:
+            # 如果 id 是列表（如 search_emails 返回的结果），取第一个元素的 id
+            first_item = id_raw[0]
+            if isinstance(first_item, dict):
+                msg_id = first_item.get("id")
+                logger.info(f"从列表第一个元素中提取邮件ID: {msg_id}")
+            else:
+                msg_id = first_item
+        else:
+            msg_id = id_raw
+        
+        # 检查是否为有效类型
+        if not isinstance(msg_id, (str, bytes)):
+            logger.warning(f"邮件ID类型无效: {type(msg_id)}, 值: {repr(msg_id)}")
+            return {"success": False, "message": "未能识别邮件ID，请重试"}
+        
+        # 检查是否为空字符串或仅包含空白字符
+        msg_id_str = str(msg_id).strip()
+        if not msg_id_str:
+            logger.warning("邮件ID为空字符串")
+            return {"success": False, "message": "未能识别邮件ID，请重试"}
+        
+        # 如果仍然是占位符格式，尝试从 context 中替换（同步纠错的后续处理）
+        if msg_id_str.startswith("{{") and context:
+            import re
+            pattern = r'\{\{step(\d+)\.([^}]+)\}\}'
+            matches = re.findall(pattern, msg_id_str)
+            if matches:
+                step_num_str, path = matches[0]
+                step_num = int(step_num_str)
+                step_results = context.get("step_results", [])
+                if step_num > 0 and step_num <= len(step_results):
+                    step_result = step_results[step_num - 1]
+                    step_data = step_result.get("result", {}).get("data", {})
+                    # 使用简单的路径解析（因为这是同步纠错，不需要完整的 get_deep_value）
+                    if path == "result[0].id":
+                        if isinstance(step_data, dict) and "emails" in step_data:
+                            emails = step_data.get("emails", [])
+                            if isinstance(emails, list) and len(emails) > 0:
+                                first_email = emails[0]
+                                if isinstance(first_email, dict):
+                                    msg_id_str = str(first_email.get("id", ""))
+                                    logger.info(f"🔧 同步纠错：从 step{step_num} 提取ID: {msg_id_str}")
+        
+        # 类型强转：确保经过 .strip() 和编码检查
+        msg_id_str = str(msg_id_str).strip()
+        
+        # 拦截无效交付：在调用 reader.get_email_content 之前，加一个硬判断
+        if msg_id_str.startswith("{{") or not msg_id_str:
+            logger.warning(f"未能识别邮件ID: {repr(msg_id_str)}")
+            return {"success": False, "message": "未能识别邮件ID，请重试"}
+        
+        # 正则判断：只有全是数字，或者特定的 IMAP UID 格式才允许通过
+        import re
+        if not re.match(r'^[0-9]+$', msg_id_str):
+            logger.warning(f"错误的邮件ID格式: {msg_id_str}")
+            return {"success": False, "message": f"错误的邮件ID格式: {msg_id_str}。请确保使用 {{stepN.result[0].id}} 语法。"}
+        
+        # id 验证通过后，再连接服务器
         if not self._ensure_reader():
             return {"success": False, "message": "无法连接到邮件服务器"}
             
-        msg_id = params.get("id")
-        if not msg_id:
-            return {"success": False, "message": "缺少邮件 ID"}
-            
         folder = params.get("folder", "INBOX")
-        details = self.email_reader.get_email_content(msg_id, folder)
+        details = self.email_reader.get_email_content(msg_id_str, folder)
         
-        if "error" in details:
-            return {"success": False, "message": details["error"]}
-            
+        # 修复 Subscriptable 错误：确保 details 不为 None 时再访问
+        if not details:
+            logger.error("get_email_content 返回了 None 或空值")
+            return {"success": False, "message": "获取邮件详情失败：返回结果为空"}
+        
+        # 安全访问 error 字段
+        if details.get("error"):
+            return {"success": False, "message": details.get("error", "未知错误")}
+        
+        # 确保返回纯数据字典，不包含任何方法引用
+        # details 应该包含 id, subject, from, body, date 等纯数据字段
+        # 如果 details 中包含非序列化对象，创建一个纯数据副本
+        clean_details = {}
+        for key, value in details.items():
+            # 只保留可序列化的基本类型（str, int, float, bool, None, dict, list）
+            if isinstance(value, (str, int, float, bool, type(None), dict, list)):
+                clean_details[key] = value
+            else:
+                logger.warning(f"过滤掉非序列化字段: {key} (类型: {type(value).__name__})")
+        
         return {
             "success": True,
             "message": "已获取邮件正文",
-            "data": details
+            "data": clean_details  # 确保返回纯数据字典
         }
 
     def _download_attachments(self, params: Dict[str, Any]) -> Dict[str, Any]:

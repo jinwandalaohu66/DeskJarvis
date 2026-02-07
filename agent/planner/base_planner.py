@@ -708,7 +708,11 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                     raise parse_error from fix_error
             
             if steps is None:
-                raise ValueError("无法解析JSON")
+                # === 增强解析器：尝试识别 Markdown 列表格式 ===
+                logger.warning("[SECURITY_SHIELD] JSON解析失败，尝试识别 Markdown 列表格式...")
+                steps = self._parse_markdown_list(content)
+                if steps is None:
+                    raise ValueError("无法解析JSON，也无法识别Markdown列表格式")
             
             # 验证格式
             if isinstance(steps, dict):
@@ -725,6 +729,18 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
             # 验证每个步骤的格式，并自动修复删除操作
             import base64
             fixed_steps = []
+            
+            # === 逻辑闭环验证：验证 browser_click 步骤 ===
+            for i, step in enumerate(steps):
+                step_type = step.get("type", "")
+                if step_type == "browser_click":
+                    params = step.get("params", {})
+                    has_selector = bool(params.get("selector"))
+                    has_coordinates = (params.get("x") is not None and params.get("y") is not None)
+                    
+                    if not has_selector and not has_coordinates:
+                        logger.error(f"[SECURITY_SHIELD] 步骤{i}: browser_click 缺少 selector 和坐标 (x, y)，无法执行")
+                        raise ValueError(f"步骤{i}: browser_click 必须提供 selector 或坐标 (x, y)")
             
             for i, step in enumerate(steps):
                 if not isinstance(step, dict):
@@ -829,7 +845,7 @@ except Exception as e:
                 else:
                     fixed_steps.append(step)
                 
-                # 如果是脚本步骤，验证 script 字段
+                # 如果是脚本步骤，验证 script 字段并检测敏感操作
                 if fixed_steps[-1].get("type") == "execute_python_script":
                     params = fixed_steps[-1].get("params", {})
                     if "script" not in params:
@@ -837,6 +853,44 @@ except Exception as e:
                     script = params.get("script", "")
                     if not isinstance(script, str) or not script.strip():
                         raise ValueError(f"步骤{i}（execute_python_script）的 script 字段无效")
+                    
+                    # === 敏感操作确认：检测毁灭性操作 ===
+                    script_decoded = script
+                    try:
+                        # 尝试 base64 解码
+                        import base64
+                        script_decoded = base64.b64decode(script).decode('utf-8', errors='ignore')
+                    except Exception:
+                        # 如果不是 base64，直接使用原字符串
+                        pass
+                    
+                    # 检测敏感操作模式
+                    dangerous_patterns = [
+                        (r'os\.system\s*\(\s*["\']rm\s+-rf\s+/', "删除根目录"),
+                        (r'os\.system\s*\(\s*["\']rm\s+-rf\s+~', "删除用户主目录"),
+                        (r'subprocess\.(call|run|Popen)\s*\(\s*["\']rm\s+-rf', "使用subprocess删除文件"),
+                        (r'os\.system\s*\(\s*["\']format\s+', "格式化磁盘"),
+                        (r'os\.system\s*\(\s*["\']del\s+/f\s+/s\s+/q\s+', "Windows强制删除"),
+                        (r'shutil\.rmtree\s*\(\s*["\']/', "删除根目录"),
+                        (r'__import__\s*\(\s*["\']os["\']\s*\)\.system\s*\(\s*["\']rm', "动态导入执行删除"),
+                    ]
+                    
+                    is_sensitive = False
+                    detected_pattern = None
+                    for pattern, description in dangerous_patterns:
+                        import re
+                        if re.search(pattern, script_decoded, re.IGNORECASE):
+                            is_sensitive = True
+                            detected_pattern = description
+                            logger.error(f"[SECURITY_SHIELD] 步骤{i}: 检测到敏感操作 - {description}")
+                            break
+                    
+                    if is_sensitive:
+                        # 在 description 中添加 [SENSITIVE] 前缀
+                        current_desc = fixed_steps[-1].get("description", "")
+                        if not current_desc.startswith("[SENSITIVE]"):
+                            fixed_steps[-1]["description"] = f"[SENSITIVE] {current_desc}"
+                            logger.warning(f"[SECURITY_SHIELD] 步骤{i}: 已标记为敏感操作，将在执行前触发用户确认")
             
             return fixed_steps
             
@@ -879,3 +933,125 @@ except Exception as e:
             logger.debug(f"响应内容（前1000字符）:\n{original_content[:1000]}")
             from agent.tools.exceptions import PlannerError
             raise PlannerError(f"解析规划结果失败: {e}")
+    
+    def _parse_markdown_list(self, content: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        解析 Markdown 列表格式并转换为步骤格式
+        
+        如果 LLM 返回了 "1. 导航到... 2. 点击..." 格式，尝试转换为步骤格式
+        
+        Args:
+            content: 原始响应内容
+            
+        Returns:
+            解析后的步骤列表，如果无法解析则返回 None
+        """
+        import re
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # 匹配 Markdown 列表格式：1. 或 - 或 * 开头
+            # 例如：
+            # 1. 导航到 https://example.com
+            # 2. 点击登录按钮
+            # 或
+            # - 导航到 https://example.com
+            # - 点击登录按钮
+            
+            list_pattern = r'(?:^|\n)(?:\d+\.\s*|[-*]\s*)(.+?)(?=\n(?:\d+\.\s*|[-*]\s*)|\n\n|$)'
+            matches = re.findall(list_pattern, content, re.MULTILINE | re.DOTALL)
+            
+            if not matches or len(matches) < 2:
+                # 如果匹配项少于2个，可能不是列表格式
+                logger.debug("[SECURITY_SHIELD] Markdown列表格式匹配项不足，跳过")
+                return None
+            
+            logger.info(f"[SECURITY_SHIELD] 识别到 {len(matches)} 个Markdown列表项，尝试转换为步骤格式")
+            
+            steps = []
+            for i, item in enumerate(matches):
+                item = item.strip()
+                if not item:
+                    continue
+                
+                # 尝试识别操作类型和参数
+                step_type = None
+                action = item
+                params = {}
+                
+                # 识别浏览器导航
+                if re.search(r'导航|访问|打开.*(http|www|\.com|\.cn)', item, re.IGNORECASE):
+                    step_type = "browser_navigate"
+                    # 提取URL
+                    url_match = re.search(r'(https?://[^\s]+|www\.[^\s]+|[^\s]+\.(com|cn|org|net)[^\s]*)', item)
+                    if url_match:
+                        params["url"] = url_match.group(1)
+                    else:
+                        params["url"] = item.split()[-1]  # 取最后一个词作为URL
+                
+                # 识别点击操作
+                elif re.search(r'点击|选择|按下', item, re.IGNORECASE):
+                    step_type = "browser_click"
+                    # 提取选择器或文本
+                    if '按钮' in item or 'button' in item.lower():
+                        # 尝试提取按钮文本
+                        text_match = re.search(r'["\']([^"\']+)["\']|([^点击选择按下]+(?:按钮|链接|元素))', item)
+                        if text_match:
+                            params["text"] = text_match.group(1) or text_match.group(2)
+                    else:
+                        # 尝试提取选择器
+                        selector_match = re.search(r'["\']([^"\']+)["\']|(#[\w-]+|\.\w+|[\w-]+)', item)
+                        if selector_match:
+                            params["selector"] = selector_match.group(1) or selector_match.group(2)
+                
+                # 识别填写操作
+                elif re.search(r'填写|输入|输入框', item, re.IGNORECASE):
+                    step_type = "browser_fill"
+                    # 提取选择器和值
+                    parts = re.split(r'[:：]|为|输入', item, maxsplit=1)
+                    if len(parts) >= 2:
+                        selector_part = parts[0].strip()
+                        value_part = parts[1].strip()
+                        # 提取选择器
+                        selector_match = re.search(r'["\']([^"\']+)["\']|(#[\w-]+|\.\w+)', selector_part)
+                        if selector_match:
+                            params["selector"] = selector_match.group(1) or selector_match.group(2)
+                        # 提取值
+                        value_match = re.search(r'["\']([^"\']+)["\']|([^\s]+)', value_part)
+                        if value_match:
+                            params["value"] = value_match.group(1) or value_match.group(2)
+                
+                # 识别文件操作
+                elif re.search(r'下载|保存|创建文件|写入', item, re.IGNORECASE):
+                    if '下载' in item or 'download' in item.lower():
+                        step_type = "download_file"
+                    elif '创建' in item or '写入' in item or 'create' in item.lower():
+                        step_type = "file_write"
+                        # 提取文件路径
+                        path_match = re.search(r'["\']([^"\']+)["\']|(/[^\s]+|~/[^\s]+|[\w-]+\.(txt|json|py))', item)
+                        if path_match:
+                            params["file_path"] = path_match.group(1) or path_match.group(2)
+                
+                # 如果无法识别，使用通用类型
+                if not step_type:
+                    step_type = "unknown"
+                    logger.warning(f"[SECURITY_SHIELD] 无法识别步骤类型: {item}")
+                
+                step = {
+                    "type": step_type,
+                    "action": action,
+                    "params": params,
+                    "description": item
+                }
+                steps.append(step)
+            
+            if steps:
+                logger.info(f"[SECURITY_SHIELD] 成功将Markdown列表转换为 {len(steps)} 个步骤")
+                return steps
+            else:
+                return None
+                
+        except Exception as e:
+            logger.warning(f"[SECURITY_SHIELD] Markdown列表解析失败: {e}")
+            return None

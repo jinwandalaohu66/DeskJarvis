@@ -4,7 +4,7 @@
 遵循 docs/ARCHITECTURE.md 中的Executor模块规范
 """
 
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Tuple
 import logging
 import time
 import base64
@@ -15,11 +15,12 @@ from agent.tools.config import Config
 from agent.user_input import UserInputManager
 from agent.executor.browser_state_manager import BrowserStateManager
 from agent.executor.ocr_helper import OCRHelper
+from agent.executor.base_executor import BaseExecutor
 
 logger = logging.getLogger(__name__)
 
 
-class BrowserExecutor:
+class BrowserExecutor(BaseExecutor):
     """
     浏览器执行器：使用Playwright执行浏览器操作
     
@@ -39,14 +40,19 @@ class BrowserExecutor:
             config: 配置对象
             emit_callback: 事件发送回调函数
         """
-        self.config = config
-        self.emit = emit_callback
+        super().__init__(config, emit_callback)
         self.playwright = None
-        self.browser: Optional[Browser] = None
+        # 注意：使用 launch_persistent_context 后，不再有 browser 对象
+        # self.browser: Optional[Browser] = None  # 已废弃，使用持久化上下文
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.download_path = config.sandbox_path / "downloads"
         self.download_path.mkdir(parents=True, exist_ok=True)
+        
+        # 持久化浏览器配置文件路径
+        browser_profile_path = Path.home() / ".deskjarvis" / "browser_profile"
+        browser_profile_path.mkdir(parents=True, exist_ok=True)
+        self.browser_profile_path = browser_profile_path
         
         # 用户输入管理器
         self.user_input_manager = UserInputManager(emit_callback=emit_callback)
@@ -57,41 +63,180 @@ class BrowserExecutor:
         # OCR助手（验证码识别）
         self.ocr_helper = OCRHelper()
         
+        # 设备像素比缓存（用于坐标校正）
+        self._device_pixel_ratio: Optional[float] = None
+        
         logger.info(f"浏览器执行器已初始化，下载目录: {self.download_path}")
+        logger.info(f"浏览器配置文件路径: {self.browser_profile_path}")
+    
+    def _apply_stealth_mode(self) -> None:
+        """
+        应用 Stealth 模式（隐藏自动化特征）
+        
+        尝试使用 playwright-stealth（如果可用），否则使用手动实现
+        """
+        try:
+            # 尝试使用 playwright-stealth（如果已安装）
+            try:
+                from playwright_stealth import stealth_sync
+                stealth_sync(self.page)
+                logger.info("[SECURITY_SHIELD] 已应用 playwright-stealth 模式")
+                return
+            except ImportError:
+                # playwright-stealth 未安装，使用手动实现
+                logger.debug("[SECURITY_SHIELD] playwright-stealth 未安装，使用手动 Stealth 实现")
+                pass
+        except Exception as e:
+            logger.warning(f"[SECURITY_SHIELD] playwright-stealth 应用失败，使用手动实现: {e}")
+        
+        # === 手动 Stealth 实现 ===
+        stealth_script = """
+        // 1. 隐藏 webdriver 属性
+        Object.defineProperty(navigator, 'webdriver', { 
+            get: () => undefined 
+        });
+        
+        // 2. 伪造 Chrome 对象
+        window.chrome = {
+            runtime: {},
+            loadTimes: function() {},
+            csi: function() {},
+            app: {}
+        };
+        
+        // 3. 伪造权限查询
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+        
+        // 4. 伪造插件
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        
+        // 5. 伪造语言
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['zh-CN', 'zh', 'en-US', 'en']
+        });
+        
+        // 6. 覆盖 toString 方法（防止检测）
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) {
+                return 'Intel Inc.';
+            }
+            if (parameter === 37446) {
+                return 'Intel Iris OpenGL Engine';
+            }
+            return getParameter(parameter);
+        };
+        
+        // 7. 伪造 Canvas 指纹
+        const toBlob = HTMLCanvasElement.prototype.toBlob;
+        const toDataURL = HTMLCanvasElement.prototype.toDataURL;
+        const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+        
+        // 8. 隐藏自动化特征
+        Object.defineProperty(navigator, 'webdriver', { 
+            get: () => false 
+        });
+        """
+        
+        self.page.add_init_script(stealth_script)
+        logger.info("[SECURITY_SHIELD] 已应用手动 Stealth 模式")
+    
+    def _get_device_pixel_ratio(self) -> float:
+        """
+        获取设备像素比（Device Pixel Ratio）
+        
+        用于坐标比例校正（Retina 屏幕等）
+        
+        Returns:
+            设备像素比，默认 1.0
+        """
+        if self._device_pixel_ratio is not None:
+            return self._device_pixel_ratio
+        
+        try:
+            if self.page:
+                dpr = self.page.evaluate("window.devicePixelRatio || 1")
+                self._device_pixel_ratio = float(dpr)
+                logger.debug(f"[SECURITY_SHIELD] 设备像素比: {self._device_pixel_ratio}")
+                return self._device_pixel_ratio
+        except Exception as e:
+            logger.warning(f"[SECURITY_SHIELD] 获取设备像素比失败: {e}")
+        
+        # 默认值
+        self._device_pixel_ratio = 1.0
+        return 1.0
+    
+    def _correct_coordinates(self, x: float, y: float) -> Tuple[float, float]:
+        """
+        校正坐标（根据设备像素比）
+        
+        Args:
+            x: 原始 X 坐标
+            y: 原始 Y 坐标
+            
+        Returns:
+            校正后的 (x, y) 坐标
+        """
+        dpr = self._get_device_pixel_ratio()
+        
+        # 如果 DPR > 1（Retina 屏幕），坐标需要除以 DPR
+        # 因为 Playwright 的坐标系统是基于 CSS 像素的，而不是物理像素
+        if dpr > 1.0:
+            corrected_x = x / dpr
+            corrected_y = y / dpr
+            logger.debug(f"[SECURITY_SHIELD] 坐标校正: ({x}, {y}) -> ({corrected_x:.2f}, {corrected_y:.2f}) [DPR={dpr}]")
+            return corrected_x, corrected_y
+        
+        return x, y
     
     def start(self) -> None:
         """
-        启动浏览器实例
+        启动浏览器实例（使用持久化上下文，保存 Cookie 和 Session）
         
         Raises:
             BrowserError: 当启动失败时
         """
         try:
-            logger.info("正在启动浏览器...")
+            logger.info("正在启动浏览器（headless 后台模式，持久化上下文）...")
             self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(
-                headless=True,
+            
+            # 使用 launch_persistent_context 创建持久化上下文
+            # 这样 Cookie、Session、LocalStorage 等会自动保存和恢复
+            self.context = self.playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.browser_profile_path),
+                headless=True,  # 强制 headless 模式，不显示浏览器窗口
+                accept_downloads=True,
+                viewport={"width": 1920, "height": 1080},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                locale="zh-CN",
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
+                    "--disable-gpu",  # 禁用 GPU，确保 headless 模式稳定
+                    "--disable-dev-shm-usage",  # 避免共享内存问题
+                    "--no-first-run",  # 跳过首次运行设置
+                    "--no-default-browser-check",  # 跳过默认浏览器检查
                 ]
             )
-            self.context = self.browser.new_context(
-                accept_downloads=True,
-                viewport={"width": 1920, "height": 1080},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                locale="zh-CN",
-            )
+            
+            # launch_persistent_context 返回的是 BrowserContext，不是 Browser
+            # 所以不需要 self.browser，直接使用 self.context
             self.page = self.context.new_page()
             
-            # 隐藏自动化特征
-            self.page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            """)
+            # === Stealth 模式：隐藏自动化特征 ===
+            self._apply_stealth_mode()
             
-            logger.info("✅ 浏览器已启动")
+            logger.info(f"✅ 浏览器已启动（持久化上下文: {self.browser_profile_path}，Stealth 模式已启用）")
+            logger.info("💡 Cookie 和 Session 将自动保存，下次启动时自动恢复登录状态")
         except Exception as e:
             error_msg = f"启动浏览器失败: {str(e)}"
             logger.error(error_msg, exc_info=True)
@@ -100,8 +245,11 @@ class BrowserExecutor:
     def stop(self) -> None:
         """停止浏览器实例"""
         try:
-            if self.browser:
-                self.browser.close()
+            # 使用持久化上下文时，关闭 context 即可（会自动保存状态）
+            if self.context:
+                self.context.close()
+                logger.info("浏览器上下文已关闭（状态已保存）")
+            # launch_persistent_context 不返回 browser 对象，所以不需要关闭 browser
             if self.playwright:
                 self.playwright.stop()
             logger.info("浏览器已停止")
@@ -122,14 +270,15 @@ class BrowserExecutor:
         Raises:
             BrowserError: 当执行失败时
         """
+        # 自动启动浏览器（如果未启动）- 确保使用 headless 模式
         if not self.page:
-            raise BrowserError("浏览器未启动，请先调用start()")
+            logger.info("浏览器未启动，自动在后台启动 headless 浏览器...")
+            self.start()
         
+        self._log_execution_start(step)
         step_type = step.get("type")
         action = step.get("action", "")
         params = step.get("params", {})
-        
-        logger.info(f"执行步骤: {step_type} - {action}")
         
         try:
             if step_type == "browser_navigate":
@@ -235,12 +384,14 @@ class BrowserExecutor:
     
     def _click(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        点击元素（增强版：支持文本定位 + 等待可见 + 滚动 + 多元素处理）
+        点击元素（增强版：支持文本定位 + 等待可见 + 滚动 + 多元素处理 + 坐标点击）
         
         Args:
             params: 参数字典
                 - selector: CSS选择器（可选）
                 - text: 文本内容（可选，优先使用）
+                - x: X坐标（可选，用于坐标点击）
+                - y: Y坐标（可选，用于坐标点击）
                 - timeout: 超时时间（毫秒，默认60000）
         
         Returns:
@@ -251,10 +402,49 @@ class BrowserExecutor:
         """
         selector = params.get("selector")
         text = params.get("text")  # 新增：文本定位参数
+        x = params.get("x")
+        y = params.get("y")
         timeout = params.get("timeout", 60000)
         
+        # 如果提供了坐标，直接使用坐标点击（视觉定位的降级方案）
+        if x is not None and y is not None:
+            try:
+                # === 坐标比例校正 ===
+                corrected_x, corrected_y = self._correct_coordinates(x, y)
+                
+                # 获取视口大小（用于坐标验证和调试）
+                viewport = self.page.viewport_size
+                viewport_width = viewport.get("width", 1920) if viewport else 1920
+                viewport_height = viewport.get("height", 1080) if viewport else 1080
+                
+                # 验证坐标是否在视口范围内（使用校正后的坐标）
+                if corrected_x < 0 or corrected_x > viewport_width or corrected_y < 0 or corrected_y > viewport_height:
+                    logger.warning(f"坐标 ({corrected_x:.2f}, {corrected_y:.2f}) 超出视口范围 ({viewport_width}x{viewport_height})，但仍尝试点击")
+                
+                logger.info(f"使用坐标点击: ({x}, {y}) -> ({corrected_x:.2f}, {corrected_y:.2f}) (Viewport: {viewport_width}x{viewport_height})")
+                
+                # 执行坐标点击（使用校正后的坐标）
+                self.page.mouse.click(corrected_x, corrected_y)
+                logger.info("✅ 已成功点击坐标")
+                return {
+                    "success": True,
+                    "message": f"已点击坐标 ({corrected_x:.2f}, {corrected_y:.2f})",
+                    "data": {"x": corrected_x, "y": corrected_y, "original_x": x, "original_y": y, "method": "coordinate", "viewport": {"width": viewport_width, "height": viewport_height}, "dpr": self._get_device_pixel_ratio()}
+                }
+            except Exception as e:
+                error_msg = f"坐标点击失败: ({x}, {y}) - {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                # 失败时截图
+                screenshot_path = self.download_path / f"click_error_{int(time.time())}.png"
+                try:
+                    self.page.screenshot(path=str(screenshot_path), full_page=True)
+                    logger.error(f"坐标点击失败，已截图: {screenshot_path}")
+                except Exception:
+                    pass
+                raise BrowserError(error_msg) from e
+        
         if not selector and not text:
-            raise BrowserError("点击参数缺少selector或text")
+            raise BrowserError("点击参数缺少selector、text或坐标(x,y)")
         
         try:
             # 步骤1: 根据参数类型选择定位方式
@@ -309,9 +499,55 @@ class BrowserExecutor:
             logger.info(f"找到 {count} 个匹配元素")
             
             if count == 0:
-                # 元素不存在，先截图调试
+                # 元素不存在，尝试 OCR 视觉对齐
+                logger.warning("[SECURITY_SHIELD] 未找到 DOM 元素，尝试 OCR 视觉对齐...")
+                
+                # 如果提供了文本，尝试使用 OCR 查找坐标
+                if text:
+                    try:
+                        # 截图
+                        screenshot_path = self.download_path / f"click_ocr_{int(time.time())}.png"
+                        self.page.screenshot(path=str(screenshot_path), full_page=True)
+                        
+                        # 读取截图并转换为 base64
+                        with open(screenshot_path, "rb") as f:
+                            image_bytes = f.read()
+                        image_base64 = base64.b64encode(image_bytes).decode()
+                        
+                        # 使用 OCR 查找文本坐标
+                        ocr_result = self.ocr_helper.find_text_coordinates(image_base64, text, fuzzy_match=True)
+                        
+                        if ocr_result:
+                            ocr_x = ocr_result["x"]
+                            ocr_y = ocr_result["y"]
+                            logger.info(f"[SECURITY_SHIELD] OCR找到文本 '{text}' 的坐标: ({ocr_x}, {ocr_y})")
+                            
+                            # 校正坐标并点击
+                            corrected_x, corrected_y = self._correct_coordinates(ocr_x, ocr_y)
+                            self.page.mouse.click(corrected_x, corrected_y)
+                            
+                            logger.info("✅ 已通过 OCR 视觉对齐成功点击")
+                            return {
+                                "success": True,
+                                "message": f"已通过 OCR 视觉对齐点击文本 '{text}'",
+                                "data": {
+                                    "text": text,
+                                    "x": corrected_x,
+                                    "y": corrected_y,
+                                    "original_x": ocr_x,
+                                    "original_y": ocr_y,
+                                    "method": "ocr_visual_alignment",
+                                    "confidence": ocr_result.get("confidence", 0.0)
+                                }
+                            }
+                        else:
+                            logger.warning(f"[SECURITY_SHIELD] OCR未找到文本 '{text}'")
+                    except Exception as ocr_err:
+                        logger.warning(f"[SECURITY_SHIELD] OCR视觉对齐失败: {ocr_err}")
+                
+                # OCR 失败或未提供文本，截图并抛出错误
                 screenshot_path = self.download_path / f"click_error_{int(time.time())}.png"
-                self.page.screenshot(path=str(screenshot_path))
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
                 raise BrowserError(f"未找到元素，已截图: {screenshot_path}")
             
             # 确保 count 是整数
@@ -347,9 +583,36 @@ class BrowserExecutor:
             # 步骤5: 等待元素稳定（可点击状态）
             visible_locator.wait_for(state="attached", timeout=5000)
             
-            # 步骤6: 执行点击
+            # 步骤6: 检查元素是否被遮挡（Overlay）
+            try:
+                # 检查元素是否可点击（未被遮挡）
+                is_clickable = visible_locator.is_visible()
+                if not is_clickable:
+                    logger.warning("[SECURITY_SHIELD] 元素可能被遮挡，尝试关闭遮挡层...")
+                    # 尝试关闭常见的遮挡层（弹窗、模态框等）
+                    self._try_close_overlay()
+            except Exception:
+                pass
+            
+            # 步骤7: 执行点击（如果被遮挡，使用 force=True）
             logger.info("执行点击...")
-            visible_locator.click(timeout=timeout)
+            try:
+                visible_locator.click(timeout=timeout)
+            except Exception as e:
+                # 如果点击失败，可能是被遮挡，尝试强制点击
+                if "is not visible" in str(e).lower() or "obscured" in str(e).lower():
+                    logger.warning("[SECURITY_SHIELD] 元素被遮挡，尝试强制点击...")
+                    try:
+                        # 先尝试关闭遮挡层
+                        self._try_close_overlay()
+                        # 再次尝试点击
+                        visible_locator.click(timeout=timeout)
+                    except Exception:
+                        # 最后尝试强制点击
+                        logger.warning("[SECURITY_SHIELD] 使用强制点击（force=True）")
+                        visible_locator.click(timeout=timeout, force=True)
+                else:
+                    raise
             
             logger.info("✅ 已成功点击元素")
             
@@ -373,12 +636,76 @@ class BrowserExecutor:
             raise BrowserError(error_msg) from e
     
     def _fill(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """填写表单字段"""
+        """
+        填写表单字段（支持选择器填充和坐标点击+键盘输入）
+        
+        Args:
+            params: 参数字典
+                - selector: CSS选择器（可选）
+                - value: 要填写的值（必需）
+                - x: X坐标（可选，用于坐标点击+输入）
+                - y: Y坐标（可选，用于坐标点击+输入）
+        """
         selector = params.get("selector")
         value = params.get("value")
+        x = params.get("x")
+        y = params.get("y")
         
-        if not selector or value is None:
-            raise BrowserError("填写参数缺少selector或value")
+        if value is None:
+            raise BrowserError("填写参数缺少value")
+        
+        # === 视觉降级模式：坐标点击+键盘输入 ===
+        if x is not None and y is not None:
+            try:
+                # === 坐标比例校正 ===
+                corrected_x, corrected_y = self._correct_coordinates(x, y)
+                
+                # 获取视口大小（用于坐标验证和调试）
+                viewport = self.page.viewport_size
+                viewport_width = viewport.get("width", 1920) if viewport else 1920
+                viewport_height = viewport.get("height", 1080) if viewport else 1080
+                
+                logger.info(f"使用坐标填表: ({x}, {y}) -> ({corrected_x:.2f}, {corrected_y:.2f}) -> '{value}' (Viewport: {viewport_width}x{viewport_height})")
+                
+                # 1. 移动鼠标并点击，激活输入框（使用校正后的坐标）
+                self.page.mouse.click(corrected_x, corrected_y)
+                
+                # 2. 短暂等待，模拟人类反应，防止触发反爬
+                self.page.wait_for_timeout(200)
+                
+                # 3. 清空现有内容（如果有）
+                # macOS 使用 Meta+A (Command+A)，Windows/Linux 使用 Control+A
+                import platform
+                if platform.system() == "Darwin":  # macOS
+                    self.page.keyboard.press("Meta+A")
+                else:
+                    self.page.keyboard.press("Control+A")
+                self.page.wait_for_timeout(100)
+                
+                # 4. 模拟键盘输入（这比 fill 更像人，能绕过很多 React/Vue 的绑定问题）
+                self.page.keyboard.type(str(value), delay=50)  # 添加延迟，更像人类输入
+                
+                logger.info("✅ 已成功通过坐标填表")
+                return {
+                    "success": True,
+                    "message": f"已通过坐标 ({corrected_x:.2f}, {corrected_y:.2f}) 填写: {value}",
+                    "data": {"x": corrected_x, "y": corrected_y, "original_x": x, "original_y": y, "value": value, "method": "coordinate_type", "dpr": self._get_device_pixel_ratio()}
+                }
+            except Exception as e:
+                error_msg = f"坐标填表失败: ({x}, {y}) - {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                # 失败时截图
+                screenshot_path = self.download_path / f"fill_error_{int(time.time())}.png"
+                try:
+                    self.page.screenshot(path=str(screenshot_path), full_page=True)
+                    logger.error(f"坐标填表失败，已截图: {screenshot_path}")
+                except Exception:
+                    pass
+                raise BrowserError(error_msg) from e
+        
+        # === 正常模式：使用选择器填充 ===
+        if not selector:
+            raise BrowserError("填写参数缺少selector或坐标(x,y)")
         
         try:
             logger.info(f"填写字段: {selector} = {value}")
@@ -470,6 +797,87 @@ class BrowserExecutor:
             error_msg = f"填写字段失败: {selector} - {str(e)}"
             logger.error(error_msg, exc_info=True)
             raise BrowserError(error_msg) from e
+    
+    def _try_close_overlay(self) -> bool:
+        """
+        尝试关闭遮挡层（Overlay）
+        
+        常见的遮挡层包括：
+        - 模态框（Modal）
+        - 弹窗（Popup）
+        - 通知横幅（Notification Banner）
+        - Cookie 同意框
+        
+        Returns:
+            是否成功关闭遮挡层
+        """
+        try:
+            logger.info("[SECURITY_SHIELD] 尝试关闭遮挡层...")
+            
+            # 常见的关闭按钮选择器（按优先级排序）
+            close_selectors = [
+                # 通用关闭按钮
+                "[aria-label*='close' i]",
+                "[aria-label*='关闭' i]",
+                "[aria-label*='Close' i]",
+                ".close",
+                ".close-btn",
+                ".close-button",
+                "[class*='close']",
+                "[class*='Close']",
+                # 模态框关闭按钮
+                ".modal-close",
+                ".modal .close",
+                "[data-dismiss='modal']",
+                # Cookie 同意框
+                "#cookie-consent-close",
+                ".cookie-consent-close",
+                "[id*='cookie'][class*='close']",
+                # 通知横幅
+                ".notification-close",
+                ".alert-close",
+                "[class*='notification'][class*='close']",
+            ]
+            
+            # 尝试点击关闭按钮
+            for sel in close_selectors:
+                try:
+                    close_btn = self.page.locator(sel).first
+                    if close_btn.is_visible(timeout=500):
+                        close_btn.click(timeout=1000)
+                        logger.info(f"[SECURITY_SHIELD] 已关闭遮挡层: {sel}")
+                        self.page.wait_for_timeout(300)
+                        return True
+                except Exception:
+                    continue
+            
+            # 尝试按 Escape 键（关闭模态框的通用方法）
+            try:
+                self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(300)
+                logger.debug("[SECURITY_SHIELD] 已按 Escape 键")
+                return True
+            except Exception:
+                pass
+            
+            # 尝试点击页面背景（关闭模态框）
+            try:
+                # 点击页面中心（通常是模态框的背景）
+                viewport = self.page.viewport_size
+                center_x = viewport.get("width", 1920) // 2
+                center_y = viewport.get("height", 1080) // 2
+                self.page.mouse.click(center_x, center_y)
+                self.page.wait_for_timeout(300)
+                logger.debug("[SECURITY_SHIELD] 已点击页面背景")
+                return True
+            except Exception:
+                pass
+            
+            logger.debug("[SECURITY_SHIELD] 无法关闭遮挡层")
+            return False
+        except Exception as e:
+            logger.warning(f"[SECURITY_SHIELD] 关闭遮挡层时出错: {e}")
+            return False
     
     def _handle_baidu_popups(self):
         """处理百度页面的各种弹窗"""
