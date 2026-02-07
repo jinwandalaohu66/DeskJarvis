@@ -75,7 +75,7 @@ class DeskJarvisAgent:
         # 6. 初始化 Orchestrator (延迟初始化，因为依赖 lazy memory 和 dynamic emit)
         self._orchestrator: Optional[TaskOrchestrator] = None
         
-        logger.info(f"DeskJarvis Agent Initialized (Refactored Facade)")
+        logger.info("DeskJarvis Agent Initialized (Refactored Facade)")
 
     @property
     def memory(self) -> MemoryManager:

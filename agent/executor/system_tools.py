@@ -2898,7 +2898,7 @@ class SystemTools:
             
             error_message = "视觉分析失败：VLM和OCR均不可用"
             if suggestions:
-                error_message += f"\n\n修复建议：\n" + "\n".join(f"- {s}" for s in suggestions)
+                error_message += "\n\n修复建议：\n" + "\n".join(f"- {s}" for s in suggestions)
             
             # 判断是否为配置错误（不可恢复）
             is_config_error = (
@@ -3295,7 +3295,7 @@ class SystemTools:
 注意：macOS Retina屏幕的截图像素可能是2880px，但系统坐标系只有1440px，请返回系统坐标系坐标。
 """
             elif action == "extract_text":
-                prompt = f"""
+                prompt = """
 请提取这张截图中的所有文本内容，返回纯文本格式。
 """
             else:  # query

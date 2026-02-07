@@ -143,7 +143,7 @@ class PlanExecutor:
                 logger.warning(f"步骤 {step_index} 失败 (尝试 {attempt}/{max_attempts}): {error_msg}")
                 
                 if attempt < max_attempts:
-                    self.emit("thinking", {"content": f"步骤异常，正在分析修复方案...", "phase": "reflection"})
+                    self.emit("thinking", {"content": "步骤异常，正在分析修复方案...", "phase": "reflection"})
                     reflection = self.reflector.analyze_failure(current_step, error_msg, str(current_step.get("params", {})))
                     
                     if reflection.is_retryable and reflection.modified_step:
@@ -220,7 +220,7 @@ class PlanExecutor:
             if "close" in action or "关闭" in action:
                 step_type = "close_app"
                 step["type"] = "close_app"
-                logger.warning(f"🔧 修复错误类型: app_control → close_app")
+                logger.warning("🔧 修复错误类型: app_control → close_app")
             else:
                 step_type = "open_app"
                 step["type"] = "open_app"

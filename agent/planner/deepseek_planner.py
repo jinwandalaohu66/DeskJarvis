@@ -159,10 +159,10 @@ class DeepSeekPlanner(BasePlanner):
                         "type": "list_files",
                         "action": f"列出目录内容以确认文件位置: {grounding_path}",
                         "params": {"path": grounding_path},
-                        "description": f"Protocol G+ 强制步骤：检测到模糊词汇，必须先确认目录内容再执行后续操作"
+                        "description": "Protocol G+ 强制步骤：检测到模糊词汇，必须先确认目录内容再执行后续操作"
                     }
                     steps.insert(0, list_files_step)
-                    logger.info(f"✅ 已插入 list_files 步骤作为第一步")
+                    logger.info("✅ 已插入 list_files 步骤作为第一步")
             
             # 保存用户指令，用于后处理检查
             user_instruction_lower = user_instruction.lower() if user_instruction else ""
