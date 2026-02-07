@@ -90,26 +90,56 @@ class IntentRouter:
             "app_close": {"type": "close_app", "action": "close"},
         }
         
-        # 缓存意图的 Embeddings
+        # 缓存意图的 Embeddings（延迟加载，避免启动时阻塞）
         self.intent_embeddings: Dict[str, np.ndarray] = {}
-        self._cache_embeddings()
+        self._embeddings_cached = False  # 标记是否已缓存
 
     def _cache_embeddings(self):
-        """预计算意图示例的 Embeddings"""
+        """预计算意图示例的 Embeddings（延迟加载）"""
+        if self._embeddings_cached:
+            return
+            
+        # 快速检查模型是否就绪，不等待
         if not self.embedding_model.wait_until_ready(timeout=0.1):
-            # 如果模型未就绪，首次推理时会尝试加载
-            # 但这里我们希望在后台线程加载完后再计算，避免阻塞初始化
-            # 可以通过 SharedEmbeddingModel 的 lazy load 特性解决
+            # 模型未就绪，延迟到首次使用时再加载
             return
 
+        # 批量编码所有示例，触发 SentenceTransformer 的批量处理
+        all_examples = []
+        intent_to_examples = {}
         for intent, examples in self.intent_registry.items():
-            embeddings = []
-            for ex in examples:
-                vec = self.embedding_model.encode(ex)
-                if vec:
-                    embeddings.append(vec)
-            if embeddings:
-                self.intent_embeddings[intent] = np.array(embeddings)
+            intent_to_examples[intent] = examples
+            all_examples.extend(examples)
+        
+        # 批量编码（更高效）
+        if all_examples:
+            try:
+                # 使用模型的批量编码功能
+                all_embeddings = self.embedding_model.encode_batch(all_examples)
+                if all_embeddings:
+                    # 按意图分组
+                    idx = 0
+                    for intent, examples in intent_to_examples.items():
+                        intent_embeddings = []
+                        for _ in examples:
+                            if idx < len(all_embeddings):
+                                intent_embeddings.append(all_embeddings[idx])
+                                idx += 1
+                        if intent_embeddings:
+                            self.intent_embeddings[intent] = np.array(intent_embeddings)
+                    self._embeddings_cached = True
+            except Exception as e:
+                logger.warning(f"[IntentRouter] 批量编码失败，降级到逐个编码: {e}")
+                # 降级到逐个编码
+                for intent, examples in self.intent_registry.items():
+                    embeddings = []
+                    for ex in examples:
+                        vec = self.embedding_model.encode(ex)
+                        if vec:
+                            embeddings.append(vec)
+                    if embeddings:
+                        self.intent_embeddings[intent] = np.array(embeddings)
+                self._embeddings_cached = True
                 
     def _cosine_similarity(self, v1: np.ndarray, v2: np.ndarray) -> float:
         """计算余弦相似度"""
@@ -134,15 +164,23 @@ class IntentRouter:
         text = text.strip()
         if not text:
             return None
+        
+        # 1.5. 快速关键词匹配（避免触发语义计算）
+        # 对于明显的邮件相关操作，直接返回，不触发 SentenceTransformer
+        text_lower = text.lower()
+        email_keywords = ["邮件", "email", "收件", "发件", "搜索邮件", "search_emails", "search emails"]
+        if any(kw in text_lower for kw in email_keywords):
+            # 邮件相关操作不需要语义路由，直接返回 None，走通用规划
+            return None
             
-        # 2. 获取输入文本的 Embedding
+        # 2. 延迟加载 Embeddings（首次使用时才计算）
         if not self.intent_embeddings:
              # 尝试补初始化
              self._cache_embeddings()
              
         # 如果模型还没好，降级到 None（走通用规划）
         if not self.intent_embeddings:
-            logger.warning("[IntentRouter] 意图库 Embeddings 未就绪，跳过语义路由")
+            logger.debug("[IntentRouter] 意图库 Embeddings 未就绪，跳过语义路由")
             return None
             
         query_vec = self.embedding_model.encode(text)

@@ -105,7 +105,7 @@ class SharedEmbeddingModel:
 
     def encode(self, text: str) -> List[float]:
         """
-        生成嵌入向量
+        生成嵌入向量（单个文本）
         
         Returns:
             List[float]: 向量列表。如果出错或未就绪，返回空列表。
@@ -120,9 +120,42 @@ class SharedEmbeddingModel:
             # SentenceTransformer encode 返回 numpy array 或 tensor
             # 这里的 .tolist() 确保返回标准 list
             if self._model:
-                return self._model.encode(text).tolist()
+                # 使用 convert_to_numpy=False 避免触发批量处理进度条
+                return self._model.encode(text, convert_to_numpy=True, show_progress_bar=False).tolist()
         except Exception as e:
             logger.error(f"[SharedModel] 推理失败: {e}")
+            return []
+        
+        return []
+    
+    def encode_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        批量生成嵌入向量（用于批量处理，更高效）
+        
+        Args:
+            texts: 文本列表
+            
+        Returns:
+            List[List[float]]: 向量列表的列表。如果出错或未就绪，返回空列表。
+        """
+        if not self.wait_until_ready(timeout=5):
+            return []
+            
+        if self._load_error:
+            return []
+            
+        try:
+            if self._model:
+                # 批量编码，但禁用进度条以避免 "Batches: 100%" 输出
+                embeddings = self._model.encode(
+                    texts, 
+                    convert_to_numpy=True, 
+                    show_progress_bar=False,  # 关键：禁用进度条
+                    batch_size=32  # 合理的批次大小
+                )
+                return [emb.tolist() for emb in embeddings]
+        except Exception as e:
+            logger.error(f"[SharedModel] 批量推理失败: {e}")
             return []
         
         return []

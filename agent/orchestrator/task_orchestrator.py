@@ -124,7 +124,7 @@ class TaskOrchestrator:
         
         duration = time.time() - start_time
         
-        # 5. 保存记忆 (Memory)
+        # 5. 保存记忆 (Memory) - 异步执行，避免阻塞和触发向量化进度条
         if self.memory and result.get("success"):
             try:
                 # 提取文件
@@ -133,17 +133,26 @@ class TaskOrchestrator:
                      p = step_res.get("step", {}).get("params", {})
                      for k in ["path", "file_path", "save_path"]:
                          if k in p: files_involved.append(p[k])
-                         
-                self.memory.save_task_result(
-                    instruction=user_instruction,
-                    steps=[s["step"] for s in result.get("steps", [])],
-                    result=result,
-                    success=True,
-                    duration=duration,
-                    files_involved=files_involved
-                )
+                
+                # 异步保存记忆，避免阻塞主流程和触发向量化进度条
+                import threading
+                def save_memory_async():
+                    try:
+                        self.memory.save_task_result(
+                            instruction=user_instruction,
+                            steps=[s["step"] for s in result.get("steps", [])],
+                            result=result,
+                            success=True,
+                            duration=duration,
+                            files_involved=files_involved
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to save memory: {e}")
+                
+                thread = threading.Thread(target=save_memory_async, daemon=True)
+                thread.start()
             except Exception as e:
-                logger.warning(f"Failed to save memory: {e}")
+                logger.warning(f"Failed to start memory save thread: {e}")
                 
         return result
 
