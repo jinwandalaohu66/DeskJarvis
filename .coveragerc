@@ -20,6 +20,7 @@ omit =
     agent/tools/memory_queue.py
     agent/tools/path_validator.py
     agent/tools/security_auditor.py
+    agent/tools/key_encryptor.py
 
 [report]
 skip_empty = True

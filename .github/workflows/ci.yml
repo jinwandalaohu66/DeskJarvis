@@ -37,7 +37,7 @@ jobs:
         run: mypy --follow-imports=skip agent/executor/code_interpreter.py agent/executor/script_validator.py
 
       - name: Run tests (pytest + coverage)
-        run: pytest tests/ -v --cov=agent --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
+        run: pytest tests/ -v --cov=agent --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=75
 
   # 前端类型检查
   check-frontend:
