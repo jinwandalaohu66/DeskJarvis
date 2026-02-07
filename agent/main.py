@@ -17,7 +17,7 @@ import time
 import json
 import traceback
 import contextvars
-from typing import Dict, Any, Optional, Callable, Set, Union
+from typing import Dict, Any, Optional, Callable, Set
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -264,7 +264,7 @@ class DeskJarvisAgent:
                     elif intent_type == "app_close":
                         step["type"] = "close_app"
                 else:
-                    logger.warning(f"[SECURITY_SHIELD] 无法提取应用名，回退到正常规划")
+                    logger.warning("[SECURITY_SHIELD] 无法提取应用名，回退到正常规划")
                     return None
             
             # 构造计划并执行
@@ -333,9 +333,6 @@ class DeskJarvisAgent:
         Returns:
             执行结果字典
         """
-        # === 事件白名单：只允许核心事件类型 ===
-        ALLOWED_EVENT_TYPES = {'thinking', 'executing', 'success', 'error'}
-        
         # === 状态去重：记录最近发送的事件（用于去重检查）===
         _last_event_key: Optional[str] = None
         _last_event_data: Optional[Dict[str, Any]] = None
@@ -426,6 +423,8 @@ class DeskJarvisAgent:
             3. 状态去重（避免重复事件）
             4. 添加 step_index 和 total_steps（前端友好）
             """
+            nonlocal _last_event_key, _last_event_data
+            
             # 1. 映射事件类型
             mapped_type = map_event_type(event_type)
             if not mapped_type:

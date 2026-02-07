@@ -11,13 +11,12 @@ Task Orchestrator - High Level Workflow Manager
 
 import time
 import logging
-import json
-from typing import Dict, Any, Optional, Callable, List
-
-logger = logging.getLogger(__name__)
+from typing import Dict, Any, Optional, Callable
 
 from agent.core.intent_router import IntentRouter
 from agent.orchestrator.plan_executor import PlanExecutor
+
+logger = logging.getLogger(__name__)
 
 class TaskOrchestrator:
     """
@@ -159,7 +158,8 @@ class TaskOrchestrator:
                 for step_res in result.get("steps", []):
                      p = step_res.get("step", {}).get("params", {})
                      for k in ["path", "file_path", "save_path"]:
-                         if k in p: files_involved.append(p[k])
+                         if k in p:
+                             files_involved.append(p[k])
                 
                 # 使用线程安全队列保存记忆（非阻塞，带文件锁）
                 if not hasattr(self, '_memory_queue'):

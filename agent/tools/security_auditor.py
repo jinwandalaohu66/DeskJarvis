@@ -68,7 +68,7 @@ class ASTSecurityAuditor:
         """
         try:
             tree = ast.parse(code)
-        except SyntaxError as e:
+        except SyntaxError:
             # 语法错误不是安全问题，交给语法检查器处理
             return True, ""
         

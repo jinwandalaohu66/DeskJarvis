@@ -11,8 +11,6 @@ Responsibility:
 import logging
 import json
 import base64
-import tempfile
-import os
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from pathlib import Path

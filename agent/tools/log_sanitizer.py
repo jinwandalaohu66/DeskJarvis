@@ -109,7 +109,6 @@ class LogSanitizer:
         """
         if params:
             # 如果提供了参数，检查消息中是否包含参数值
-            sanitized_params = LogSanitizer.sanitize_dict(params)
             for key, value in params.items():
                 if key in LogSanitizer.SENSITIVE_KEYWORDS or any(kw in key.lower() for kw in LogSanitizer.SENSITIVE_KEYWORDS):
                     # 替换消息中的敏感值

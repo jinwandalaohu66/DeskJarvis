@@ -3,11 +3,9 @@ Document Processor - Intelligent Document Analysis Engine (Phase 37)
 Handles PDF, Word, Excel, and Text files with "Read-on-Demand" and "Encoding Sentinel" protocols.
 """
 
-import os
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-import json
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +96,7 @@ class DocumentProcessor:
                 elif isinstance(item, list):
                     continue # 暂时只取一级大纲
             return outline[:10]
-        except:
+        except Exception:
             return []
 
     def _read_pdf_chunk(self, path: Path, page_num: Optional[int], keywords: Optional[List[str]]) -> Dict[str, Any]:
@@ -120,7 +118,8 @@ class DocumentProcessor:
                     text = page.extract_text()
                     if any(k.lower() in text.lower() for k in keywords):
                         hits.append({"page": i+1, "content": text})
-                    if len(hits) >= 3: break # 限制返回量
+                    if len(hits) >= 3:
+                        break  # 限制返回量
                 return {"hits": hits}
             
             # 默认返回第一页
@@ -197,5 +196,5 @@ class DocumentProcessor:
                 return result['encoding'] or 'utf-8'
         except ImportError:
             return "utf-8"
-        except:
+        except Exception:
             return "utf-8"

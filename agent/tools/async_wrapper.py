@@ -11,7 +11,6 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Callable, Any, Optional
-import time
 
 logger = logging.getLogger(__name__)
 

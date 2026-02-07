@@ -8,9 +8,8 @@ Plan Executor - Agent Execution Engine
 - 向前端发送实时事件 (Emit)
 """
 
-import time
 import logging
-from typing import Dict, Any, List, Callable, Optional
+from typing import Dict, Any, List, Callable
 
 from agent.tools.exceptions import PlaceholderError
 from agent.tools.log_sanitizer import LogSanitizer
@@ -213,16 +212,16 @@ class PlanExecutor:
                                 return {"success": False, "message": "任务已取消"}
                         
                         if confirmation_key not in context:
-                            logger.error(f"[SECURITY_SHIELD] 用户未在30秒内确认敏感操作，取消执行")
+                            logger.error("[SECURITY_SHIELD] 用户未在30秒内确认敏感操作，取消执行")
                             return {"success": False, "message": "用户未确认敏感操作，执行已取消"}
                     
                     # 检查确认结果
                     confirmed = context.get(confirmation_key, False)
                     if not confirmed:
-                        logger.warning(f"[SECURITY_SHIELD] 用户拒绝了敏感操作")
+                        logger.warning("[SECURITY_SHIELD] 用户拒绝了敏感操作")
                         return {"success": False, "message": "用户拒绝了敏感操作，执行已取消"}
                     else:
-                        logger.info(f"[SECURITY_SHIELD] 用户已确认敏感操作，继续执行")
+                        logger.info("[SECURITY_SHIELD] 用户已确认敏感操作，继续执行")
                 
                 step_type = current_step.get("type", "")
                 executor = self._get_executor_for_step(step_type)
@@ -276,7 +275,7 @@ class PlanExecutor:
             except PlaceholderError as e:
                 # === 占位符错误：强制触发 Reflector 重新分析 ===
                 logger.error(f"[SECURITY_SHIELD] 步骤 {step_index} 占位符错误: {e.placeholder}")
-                logger.info(f"[SECURITY_SHIELD] 触发 Reflector 重新分析上下文以修复占位符")
+                logger.info("[SECURITY_SHIELD] 触发 Reflector 重新分析上下文以修复占位符")
                 
                 # 构造占位符错误的上下文信息
                 placeholder_context = f"占位符替换失败: {e.placeholder}。请检查上一步的执行结果，确保返回了正确的数据。"

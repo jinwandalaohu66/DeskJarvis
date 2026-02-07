@@ -12,8 +12,8 @@
             return err(f"操作失败: {e}")
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, TypeVar, Generic
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 
 @dataclass

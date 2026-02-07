@@ -49,8 +49,6 @@ class OCRHelper:
         # 检查 Tesseract OCR（通用文本提取）
         try:
             import pytesseract
-            from PIL import Image
-            import io
             # 尝试运行 tesseract --version 检查是否安装
             pytesseract.get_tesseract_version()
             
@@ -268,7 +266,6 @@ class OCRHelper:
                     import pytesseract
                     from PIL import Image
                     import io
-                    import re
                     
                     # 将字节转换为PIL Image
                     image = Image.open(io.BytesIO(image_bytes))

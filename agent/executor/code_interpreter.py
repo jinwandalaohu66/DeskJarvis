@@ -171,7 +171,7 @@ class CodeInterpreter:
                     try:
                         json.dumps(value, default=lambda o: f"<Non-serializable: {type(o).__name__}>")
                         simplified_context[key] = value
-                    except:
+                    except (TypeError, ValueError):
                         simplified_context[key] = f"<Non-serializable: {type(value).__name__}>"
                 context_json_str = json.dumps(simplified_context, ensure_ascii=False, default=lambda o: f"<Non-serializable: {type(o).__name__}>")
             

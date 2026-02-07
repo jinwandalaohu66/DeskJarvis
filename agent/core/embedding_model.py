@@ -10,7 +10,7 @@ Shared Embedding Model Manager
 import logging
 import threading
 import time
-from typing import List, Optional, Any
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 

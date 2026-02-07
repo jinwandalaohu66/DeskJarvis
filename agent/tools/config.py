@@ -218,9 +218,12 @@ class Config:
         imap = self.get("email_imap_server")
         if not imap:
             smtp = self.email_smtp_server
-            if "smtp.qq.com" in smtp: return "imap.qq.com"
-            if "smtp.gmail.com" in smtp: return "imap.gmail.com"
-            if "smtp.outlook.com" in smtp: return "outlook.office365.com"
+            if "smtp.qq.com" in smtp:
+                return "imap.qq.com"
+            if "smtp.gmail.com" in smtp:
+                return "imap.gmail.com"
+            if "smtp.outlook.com" in smtp:
+                return "outlook.office365.com"
             # 默认尝试替换前缀
             if smtp.startswith("smtp."):
                 return smtp.replace("smtp.", "imap.")

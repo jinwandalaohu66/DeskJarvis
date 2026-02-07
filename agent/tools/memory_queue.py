@@ -11,7 +11,7 @@ import logging
 import threading
 import queue
 import platform
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 # 文件锁支持（Unix 使用 fcntl，Windows 使用 msvcrt）
 try:
     if platform.system() != "Windows":
-        import fcntl
+        import fcntl  # noqa: F401
         HAS_FLOCK = True
     else:
-        import msvcrt
+        import msvcrt  # noqa: F401
         HAS_FLOCK = True
 except ImportError:
     HAS_FLOCK = False

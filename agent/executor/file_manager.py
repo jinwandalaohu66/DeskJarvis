@@ -822,7 +822,7 @@ class FileManager:
         # 安全：验证目标目录（使用相同的验证逻辑）
         try:
             self._validate_path(target_dir)
-        except FileManagerError as e:
+        except FileManagerError:
             raise FileManagerError(
                 f"目标目录不在允许的操作范围内: {target_dir}。"
                 f"只允许操作用户主目录和沙盒目录下的文件。"

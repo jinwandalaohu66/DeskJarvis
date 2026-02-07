@@ -7,7 +7,7 @@ Email Executor
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable
 
 from agent.executor.email_sender import EmailSender
 from agent.executor.email_reader import EmailReader

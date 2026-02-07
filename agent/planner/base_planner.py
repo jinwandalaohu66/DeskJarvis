@@ -876,12 +876,10 @@ except Exception as e:
                     ]
                     
                     is_sensitive = False
-                    detected_pattern = None
                     for pattern, description in dangerous_patterns:
                         import re
                         if re.search(pattern, script_decoded, re.IGNORECASE):
                             is_sensitive = True
-                            detected_pattern = description
                             logger.error(f"[SECURITY_SHIELD] 步骤{i}: 检测到敏感操作 - {description}")
                             break
                     

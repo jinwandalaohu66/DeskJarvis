@@ -8,9 +8,8 @@ Semantic Intent Router
 """
 
 import logging
-import json
 import numpy as np
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from agent.core.embedding_model import SharedEmbeddingModel
 
@@ -347,7 +346,7 @@ class IntentRouter:
             return False
         
         if not text or not text.strip():
-            logger.warning(f"[SECURITY_SHIELD] 示例文本为空，无法添加")
+            logger.warning("[SECURITY_SHIELD] 示例文本为空，无法添加")
             return False
         
         # 添加到意图库

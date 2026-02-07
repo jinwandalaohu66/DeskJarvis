@@ -9,7 +9,7 @@ import logging
 import time
 import base64
 from pathlib import Path
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from playwright.sync_api import sync_playwright, BrowserContext, Page
 from agent.tools.exceptions import BrowserError
 from agent.tools.config import Config
 from agent.user_input import UserInputManager
@@ -277,7 +277,6 @@ class BrowserExecutor(BaseExecutor):
         
         self._log_execution_start(step)
         step_type = step.get("type")
-        action = step.get("action", "")
         params = step.get("params", {})
         
         try:

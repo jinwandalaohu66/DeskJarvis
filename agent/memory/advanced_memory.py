@@ -11,8 +11,8 @@
 import json
 import logging
 import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Any, Optional
 from collections import Counter, defaultdict
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,6 @@ class EmotionAnalyzer:
                 "suggestion": "..."
             }
         """
-        text_lower = text.lower()
-        
         emotion_scores = {}
         keywords_found = {}
         
@@ -112,7 +110,7 @@ class EmotionAnalyzer:
                 try:
                     hour = datetime.fromisoformat(timestamp).hour
                     time_emotions[hour].append(e.get("emotion", "neutral"))
-                except:
+                except Exception:
                     pass
         
         # 找出高峰时段
@@ -193,7 +191,7 @@ class WorkflowDiscovery:
                     if isinstance(steps, str):
                         try:
                             steps = json.loads(steps)
-                        except:
+                        except Exception:
                             steps = []
                     action_sequences.append(self._extract_action_sequence(steps))
                 
@@ -238,7 +236,7 @@ class WorkflowDiscovery:
         if isinstance(steps, str):
             try:
                 steps = json.loads(steps)
-            except:
+            except Exception:
                 steps = []
         
         return {
@@ -390,7 +388,7 @@ class ProactiveLearner:
                 try:
                     hour = datetime.fromisoformat(timestamp).hour
                     hour_counts[hour] += 1
-                except:
+                except Exception:
                     pass
         
         # 找高峰时段

@@ -5,7 +5,6 @@
 通过事件通知前端，通过文件交换数据
 """
 
-import os
 import json
 import time
 import uuid

@@ -14,7 +14,7 @@ import json
 import base64
 from datetime import datetime, timedelta
 from pathlib import Path
-from agent.tools.exceptions import BrowserError, FileManagerError
+from agent.tools.exceptions import BrowserError
 from agent.tools.config import Config
 from agent.executor.code_interpreter import CodeInterpreter
 from agent.executor.document_processor import DocumentProcessor
@@ -144,7 +144,6 @@ class SystemTools(BaseExecutor):
         """
         self._log_execution_start(step)
         step_type = step.get("type")
-        action = step.get("action", "")
         params = step.get("params", {})
         
         try:
@@ -1275,7 +1274,6 @@ class SystemTools(BaseExecutor):
         logger.debug(f"脚本内容（前500字符）:\n{script[:500]}")
         
         # 检查脚本是否包含 Base64 编码（避免 Planner 错误使用 Base64）
-        import base64
         import string
         script_clean = "".join(script.split())
         base64_chars = set(string.ascii_letters + string.digits + "+/=_-")
@@ -1334,13 +1332,8 @@ class SystemTools(BaseExecutor):
         执行Python脚本（旧版本，保留作为备用）
         """
         script = params.get("script")
-        reason = params.get("reason", "未提供原因")
         
         try:
-            # 创建临时脚本文件
-            import tempfile
-            import os
-            
             # 在沙盒目录中创建临时脚本文件
             temp_script_dir = self.sandbox_path / "scripts"
             temp_script_dir.mkdir(parents=True, exist_ok=True)
@@ -2291,7 +2284,6 @@ class SystemTools(BaseExecutor):
             包含建议信息的字典
         """
         import difflib
-        import os
         
         parent = target_path.parent
         suggestions = {
@@ -2419,8 +2411,9 @@ class SystemTools(BaseExecutor):
                 
                 data = self.doc_processor.get_document_map(file_key)
                 if "error" not in data:
-                    if file_key not in cache: cache[file_key] = {}
-                    cache[file_key]["map"] = data # 存入缓存
+                    if file_key not in cache:
+                        cache[file_key] = {}
+                    cache[file_key]["map"] = data  # 存入缓存
             elif action == "read":
                 page_num = params.get("page_num")
                 # 读特定页
@@ -2428,7 +2421,8 @@ class SystemTools(BaseExecutor):
             elif action == "analyze":
                 # 深度分析逻辑
                 doc_map = self.doc_processor.get_document_map(file_key)
-                if "error" in doc_map: return {"success": False, "message": doc_map["error"]}
+                if "error" in doc_map:
+                    return {"success": False, "message": doc_map["error"]}
                 
                 content_data = self.doc_processor.read_specific_chunk(file_key, page_num=1)
                 content = content_data.get("content", "")
@@ -2688,7 +2682,8 @@ class SystemTools(BaseExecutor):
             return {"success": False, "message": "目前仅支持 macOS 系统操控提醒事项"}
 
         if action == "create":
-            if not title: return {"success": False, "message": "创建提醒需要 title"}
+            if not title:
+                return {"success": False, "message": "创建提醒需要 title"}
             script = f'''
             tell application "Reminders"
                 make new reminder with properties {{name:"{title}"}}
@@ -2734,7 +2729,6 @@ class SystemTools(BaseExecutor):
         try:
             # 使用配置的 AI 进行处理
             from agent.tools.config import Config
-            import os
             
             config = Config()
             provider = config.provider
@@ -2803,8 +2797,6 @@ class SystemTools(BaseExecutor):
             - method: 使用的方法（"ocr" 或 "vlm"）
             - timestamp: 截图时间戳（用于坐标系验证）
         """
-        import os
-        
         action = params.get("action", "query")
         query = params.get("query", "")
         image_path = params.get("image_path")

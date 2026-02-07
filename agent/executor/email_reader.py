@@ -8,7 +8,6 @@ from email.header import decode_header
 import logging
 import threading
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,7 @@ class EmailReader:
             status, _ = self.mail.select(folder)
             if status == 'OK':
                 return True
-        except:
+        except Exception:
             pass
 
         # 2. 如果失败，开始“盲猜”逻辑
@@ -94,7 +93,7 @@ class EmailReader:
                 if status == 'OK':
                     logger.info(f"文件夹选择回退：{folder} -> {fb}")
                     return True
-            except:
+            except Exception:
                 continue
         
         # 3. 最后手段：列出所有文件夹并尝试第一个
@@ -108,7 +107,7 @@ class EmailReader:
                         if status == 'OK':
                             logger.info(f"最终回退：使用文件夹 {f_name}")
                             return True
-        except:
+        except Exception:
             pass
             
         return False
@@ -451,6 +450,6 @@ class EmailReader:
         if self.mail:
             try:
                 self.mail.logout()
-            except:
+            except Exception:
                 pass
             self.mail = None
