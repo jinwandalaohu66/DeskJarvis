@@ -65,7 +65,13 @@ class PlanExecutor:
             context["step_results"] = []
         
         for i, step in enumerate(plan):
-            # 检查停止标志（支持两种方式：直接标志或检查函数）
+            # 🔴 CRITICAL: 检查停止标志（支持三种方式：stop_event、检查函数、直接标志）
+            import threading
+            stop_event = context.get("_stop_event")
+            if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+                logger.info("检测到停止标志（通过 stop_event），终止执行")
+                break
+            
             check_stop = context.get("_check_stop")
             if check_stop and callable(check_stop):
                 if check_stop():
@@ -74,6 +80,16 @@ class PlanExecutor:
             elif context.get("_stop_execution", False):
                 logger.info("检测到停止标志（直接标志），终止执行")
                 break
+            
+            # 🔴 CRITICAL: 在执行步骤前，emit "executing" 事件更新进度
+            self.emit("executing", {
+                "step_index": i,
+                "total_steps": len(plan),
+                "current_step": i + 1,
+                "step_count": len(plan),
+                "description": step.get("description", step.get("action", "")),
+                "action": step.get("action", "")
+            })
                 
             self.emit("step_started", {
                 "step_index": i,
@@ -85,6 +101,17 @@ class PlanExecutor:
             # 执行单步（包含重试逻辑）
             step_result = self._execute_step_with_retry(step, i, max_attempts, context)
             
+            # 🔴 CRITICAL: 步骤执行后立即检查停止标志（可能在步骤执行期间被设置）
+            import threading
+            stop_event = context.get("_stop_event")
+            if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+                logger.info(f"步骤 {i} 执行后检测到停止标志，终止执行")
+                step_result = {
+                    "success": False,
+                    "message": "任务已取消",
+                    "data": None
+                }
+            
             step_result_record = {
                 "step": step,
                 "result": step_result
@@ -92,6 +119,11 @@ class PlanExecutor:
             step_results.append(step_result_record)
             # 更新 context 中的 step_results 供占位符替换使用
             context["step_results"] = step_results
+            
+            # 🔴 CRITICAL: 再次检查停止标志（在检查步骤结果前）
+            if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+                logger.info("检测到停止标志，终止执行")
+                break
             
             if step_result.get("success"):
                 self.emit("step_completed", {
@@ -179,10 +211,16 @@ class PlanExecutor:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                # 在执行前检查停止标志
+                # 🔴 CRITICAL: 在执行前检查停止标志（优先检查 stop_event）
+                import threading
+                stop_event = context.get("_stop_event")
+                if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+                    logger.info(f"步骤 {step_index} 在执行前已被停止（通过 stop_event）")
+                    return {"success": False, "message": "任务已取消"}
+                
                 check_stop = context.get("_check_stop")
                 if check_stop and callable(check_stop) and check_stop():
-                    logger.info(f"步骤 {step_index} 在执行前已被停止")
+                    logger.info(f"步骤 {step_index} 在执行前已被停止（通过检查函数）")
                     return {"success": False, "message": "任务已取消"}
                 
                 # === 敏感操作确认：检查步骤是否标记为 [SENSITIVE] ===
@@ -204,12 +242,19 @@ class PlanExecutor:
                     if confirmation_key not in context:
                         # 如果没有确认结果，等待用户响应（最多等待30秒）
                         import time
+                        import threading
                         wait_start = time.time()
                         while confirmation_key not in context and (time.time() - wait_start) < 30:
-                            time.sleep(0.5)
+                            # 🔴 CRITICAL: 在等待确认期间检查停止标志
+                            stop_event = context.get("_stop_event")
+                            if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+                                return {"success": False, "message": "任务已取消"}
+                            
                             check_stop = context.get("_check_stop")
                             if check_stop and callable(check_stop) and check_stop():
                                 return {"success": False, "message": "任务已取消"}
+                            
+                            time.sleep(0.5)
                         
                         if confirmation_key not in context:
                             logger.error("[SECURITY_SHIELD] 用户未在30秒内确认敏感操作，取消执行")
@@ -224,14 +269,109 @@ class PlanExecutor:
                         logger.info("[SECURITY_SHIELD] 用户已确认敏感操作，继续执行")
                 
                 step_type = current_step.get("type", "")
+                action = current_step.get("action", "").lower()
+                params = current_step.get("params", {})
+                
+                # === 提前修复错误的类型（在获取执行器之前）===
+                if step_type == "system_control":
+                    # system_control 应该根据 action 或 params.action 转换为具体的系统操作类型
+                    # 优先检查 params 中的 action（来自 intent_router）
+                    param_action = params.get("action", "").lower()
+                    action_lower = action.lower()
+                    
+                    # 检查是否是音量控制
+                    if param_action == "volume" or "volume" in action_lower or "音量" in action or "声音" in action:
+                        step_type = "set_volume"
+                        current_step["type"] = "set_volume"
+                        # 如果没有 level 或 action，尝试从 params 或 action 字符串中解析
+                        if "level" not in params and "action" not in params:
+                            if any(kw in action_lower for kw in ["mute", "静音", "关闭声音"]):
+                                params["action"] = "mute"
+                            elif any(kw in action_lower for kw in ["unmute", "取消静音", "打开声音"]):
+                                params["action"] = "unmute"
+                            elif any(kw in action_lower for kw in ["up", "调大", "增大", "增加"]):
+                                params["action"] = "up"
+                            elif any(kw in action_lower for kw in ["down", "调小", "减小", "降低"]):
+                                params["action"] = "down"
+                            else:
+                                import re
+                                numbers = re.findall(r'\d+', action)
+                                if numbers:
+                                    level = int(numbers[0])
+                                    if 0 <= level <= 100:
+                                        params["level"] = level
+                                    else:
+                                        params["action"] = "up"
+                                else:
+                                    params["action"] = "up"
+                        logger.warning(f"🔧 修复错误类型: system_control → set_volume")
+                    # 检查是否是亮度控制
+                    elif param_action == "brightness" or "brightness" in action_lower or "亮度" in action or "屏幕" in action:
+                        step_type = "set_brightness"
+                        current_step["type"] = "set_brightness"
+                        if "level" not in params and "action" not in params:
+                            if any(kw in action_lower for kw in ["max", "最亮", "maximum"]):
+                                params["action"] = "max"
+                            elif any(kw in action_lower for kw in ["min", "最暗", "minimum"]):
+                                params["action"] = "min"
+                            elif any(kw in action_lower for kw in ["up", "调亮", "调高", "增加"]):
+                                params["action"] = "up"
+                            elif any(kw in action_lower for kw in ["down", "调暗", "调低", "降低"]):
+                                params["action"] = "down"
+                            else:
+                                import re
+                                percent_match = re.search(r'(\d+)%', action)
+                                if percent_match:
+                                    percent = int(percent_match.group(1))
+                                    if 0 <= percent <= 100:
+                                        params["level"] = percent / 100.0
+                                    else:
+                                        params["action"] = "up"
+                                else:
+                                    float_match = re.search(r'(\d+\.?\d*)', action)
+                                    if float_match:
+                                        level = float(float_match.group(1))
+                                        if 0.0 <= level <= 1.0:
+                                            params["level"] = level
+                                        elif 0 <= level <= 100:
+                                            params["level"] = level / 100.0
+                                        else:
+                                            params["action"] = "up"
+                                    else:
+                                        params["action"] = "up"
+                        logger.warning(f"🔧 修复错误类型: system_control → set_brightness")
+                    # 检查是否是系统信息
+                    elif param_action == "sys_info" or "system_info" in action_lower or "系统信息" in action or "sys_info" in action_lower:
+                        step_type = "get_system_info"
+                        current_step["type"] = "get_system_info"
+                        if "info_type" not in params:
+                            params["info_type"] = "all"
+                        logger.warning(f"🔧 修复错误类型: system_control → get_system_info")
+                    else:
+                        # 无法识别，默认使用 get_system_info
+                        step_type = "get_system_info"
+                        current_step["type"] = "get_system_info"
+                        if "info_type" not in params:
+                            params["info_type"] = "all"
+                        logger.warning(f"🔧 修复错误类型: system_control → get_system_info (默认)")
+                
                 executor = self._get_executor_for_step(step_type)
                 
                 if not executor:
                     return {"success": False, "message": f"未找到执行器: {step_type}"}
 
                 # 核心调度执行
-                result = self._dispatch_execution(executor, current_step, context)
-                last_result = result
+                try:
+                    result = self._dispatch_execution(executor, current_step, context)
+                    last_result = result
+                except Exception as e:
+                    # 捕获 TaskInterruptedException 或其他中断异常
+                    from agent.tools.exceptions import TaskInterruptedException
+                    if isinstance(e, TaskInterruptedException):
+                        logger.info(f"步骤 {step_index} 执行被中断: {e}")
+                        return {"success": False, "message": "任务已取消"}
+                    # 其他异常继续抛出，由外层处理
+                    raise
                 
                 # 执行后检查停止标志
                 if check_stop and callable(check_stop) and check_stop():
@@ -533,6 +673,85 @@ class PlanExecutor:
             else:
                 step_type = "open_app"
                 step["type"] = "open_app"
+        
+        if step_type == "system_control":
+            # system_control 应该根据 action 转换为具体的系统操作类型
+            action_lower = action.lower()
+            if "volume" in action_lower or "音量" in action or "声音" in action:
+                step_type = "set_volume"
+                step["type"] = "set_volume"
+                # 如果没有 level 或 action，尝试从 params 或 action 字符串中解析
+                if "level" not in params and "action" not in params:
+                    # 尝试解析音量参数
+                    if any(kw in action_lower for kw in ["mute", "静音", "关闭声音"]):
+                        params["action"] = "mute"
+                    elif any(kw in action_lower for kw in ["unmute", "取消静音", "打开声音"]):
+                        params["action"] = "unmute"
+                    elif any(kw in action_lower for kw in ["up", "调大", "增大", "增加"]):
+                        params["action"] = "up"
+                    elif any(kw in action_lower for kw in ["down", "调小", "减小", "降低"]):
+                        params["action"] = "down"
+                    else:
+                        # 尝试提取数字
+                        import re
+                        numbers = re.findall(r'\d+', action)
+                        if numbers:
+                            level = int(numbers[0])
+                            if 0 <= level <= 100:
+                                params["level"] = level
+                            else:
+                                params["action"] = "up"
+                        else:
+                            params["action"] = "up"
+                logger.warning(f"🔧 修复错误类型: system_control → set_volume")
+            elif "brightness" in action_lower or "亮度" in action or "屏幕" in action:
+                step_type = "set_brightness"
+                step["type"] = "set_brightness"
+                # 如果没有 level 或 action，尝试从 params 或 action 字符串中解析
+                if "level" not in params and "action" not in params:
+                    if any(kw in action_lower for kw in ["max", "最亮", "maximum"]):
+                        params["action"] = "max"
+                    elif any(kw in action_lower for kw in ["min", "最暗", "minimum"]):
+                        params["action"] = "min"
+                    elif any(kw in action_lower for kw in ["up", "调亮", "调高", "增加"]):
+                        params["action"] = "up"
+                    elif any(kw in action_lower for kw in ["down", "调暗", "调低", "降低"]):
+                        params["action"] = "down"
+                    else:
+                        # 尝试提取百分比或小数
+                        import re
+                        percent_match = re.search(r'(\d+)%', action)
+                        if percent_match:
+                            percent = int(percent_match.group(1))
+                            if 0 <= percent <= 100:
+                                params["level"] = percent / 100.0
+                            else:
+                                params["action"] = "up"
+                        else:
+                            float_match = re.search(r'(\d+\.?\d*)', action)
+                            if float_match:
+                                level = float(float_match.group(1))
+                                if 0.0 <= level <= 1.0:
+                                    params["level"] = level
+                                elif 0 <= level <= 100:
+                                    params["level"] = level / 100.0
+                                else:
+                                    params["action"] = "up"
+                            else:
+                                params["action"] = "up"
+                logger.warning(f"🔧 修复错误类型: system_control → set_brightness")
+            elif "system_info" in action_lower or "系统信息" in action or "sys_info" in action_lower:
+                step_type = "get_system_info"
+                step["type"] = "get_system_info"
+                if "info_type" not in params:
+                    params["info_type"] = "all"
+                logger.warning(f"🔧 修复错误类型: system_control → get_system_info")
+            else:
+                # 无法识别，默认使用 get_system_info
+                step_type = "get_system_info"
+                step["type"] = "get_system_info"
+                params["info_type"] = "all"
+                logger.warning(f"🔧 修复错误类型: system_control → get_system_info (默认)")
         
         # 1. Python Code Execution
         if step_type in ["python_script", "python"]:

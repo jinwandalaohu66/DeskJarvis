@@ -21,10 +21,20 @@ DeskJarvis 常驻 Python 服务进程
   {"type":"stop_ack","id":"task_123","timestamp":1234567890.0}
 """
 
+# === 在导入任何其他模块之前应用 nest_asyncio ===
+# 这允许 Playwright 的同步 API 在 asyncio 事件循环中使用
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    # nest_asyncio 未安装，会在浏览器启动时给出明确错误提示
+    pass
+
 import sys
 import json
 import logging
 import time
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
@@ -36,6 +46,10 @@ logger = logging.getLogger(__name__)
 # 全局停止标志字典：{request_id: True} 表示该任务需要停止
 _stop_flags: Dict[str, bool] = {}
 
+# 🔴 CRITICAL: 任务停止事件字典 {request_id: threading.Event}
+# 用于中断长时间操作（如等待用户输入）
+_stop_events: Dict[str, threading.Event] = {}
+
 def is_stopped(request_id: str) -> bool:
     """检查指定任务是否已被停止"""
     return _stop_flags.get(request_id, False)
@@ -46,7 +60,7 @@ def send_event(event: Dict[str, Any]) -> None:
     try:
         line = json.dumps(event, ensure_ascii=False)
         sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        sys.stdout.flush()  # 🔴 CRITICAL: 立即刷新缓冲区，确保消息立即发送
     except Exception:
         pass  # stdout 管道关闭时静默忽略
 
@@ -124,13 +138,24 @@ def main() -> None:
             elif cmd_type == "stop":
                 logger.info(f"收到停止命令，任务ID: {request_id}")
                 _stop_flags[request_id] = True
-                # 设置全局停止事件（用于中断网络操作）
+                
+                # 🔴 CRITICAL: 设置任务的 stop_event（用于中断等待用户输入等长时间操作）
+                # 如果 stop_event 不存在，创建一个新的并立即设置（防止任务刚开始时 stop_event 还未创建）
+                if request_id not in _stop_events:
+                    _stop_events[request_id] = threading.Event()
+                    logger.info(f"为任务 {request_id} 创建新的 stop_event")
+                
+                _stop_events[request_id].set()
+                logger.info(f"已设置任务 {request_id} 的 stop_event")
+                
+                # 设置全局停止事件（用于中断网络操作，向后兼容）
                 try:
                     from agent.executor.email_reader import set_stop_event
                     set_stop_event()
                     logger.info("已设置全局停止事件")
                 except Exception as e:
                     logger.warning(f"设置停止事件失败: {e}")
+                
                 send_event({
                     "type": "stop_ack",
                     "id": request_id,
@@ -183,11 +208,22 @@ def main() -> None:
                     if context is None:
                         context = {}
                     context["_request_id"] = request_id
-                    # 注入停止检查函数，让执行器可以随时检查是否被停止
+                    
+                    # 🔴 CRITICAL: 创建任务的 stop_event（threading.Event）
+                    if request_id not in _stop_events:
+                        _stop_events[request_id] = threading.Event()
+                    else:
+                        # 清除旧的停止标志（新任务开始）
+                        _stop_events[request_id].clear()
+                    
+                    # 注入 stop_event 到 context，让所有 executor 都能访问
+                    context["_stop_event"] = _stop_events[request_id]
+                    
+                    # 注入停止检查函数（向后兼容）
                     context["_check_stop"] = lambda: is_stopped(request_id)
                     context["_stop_execution"] = False  # 初始化为 False
                     
-                    # 清除停止事件（新任务开始）
+                    # 清除全局停止事件（新任务开始，向后兼容）
                     try:
                         from agent.executor.email_reader import clear_stop_event
                         clear_stop_event()
@@ -221,9 +257,11 @@ def main() -> None:
                                 "user_instruction": instruction,
                             }
                     
-                    # 清理停止标志
+                    # 清理停止标志和 stop_event
                     if request_id in _stop_flags:
                         del _stop_flags[request_id]
+                    if request_id in _stop_events:
+                        del _stop_events[request_id]
                     
                     send_event({
                         "type": "result",
@@ -233,9 +271,11 @@ def main() -> None:
                     })
                 except Exception as e:
                     logger.error("执行任务异常: " + str(e), exc_info=True)
-                    # 清理停止标志
+                    # 清理停止标志和 stop_event
                     if request_id in _stop_flags:
                         del _stop_flags[request_id]
+                    if request_id in _stop_events:
+                        del _stop_events[request_id]
                     send_event({
                         "type": "result",
                         "id": request_id,

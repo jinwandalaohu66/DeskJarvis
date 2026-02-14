@@ -4,13 +4,23 @@
 遵循 docs/ARCHITECTURE.md 中的Executor模块规范
 """
 
+# === 在导入 Playwright 之前应用 nest_asyncio ===
+# 这允许 Playwright 的同步 API 在 asyncio 事件循环中使用
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    # nest_asyncio 未安装，会在启动时给出明确错误提示
+    pass
+
 from typing import Dict, Any, Optional, Callable, Tuple
 import logging
 import time
 import base64
+import threading
 from pathlib import Path
 from playwright.sync_api import sync_playwright, BrowserContext, Page
-from agent.tools.exceptions import BrowserError
+from agent.tools.exceptions import BrowserError, TaskInterruptedException
 from agent.tools.config import Config
 from agent.user_input import UserInputManager
 from agent.executor.browser_state_manager import BrowserStateManager
@@ -54,8 +64,15 @@ class BrowserExecutor(BaseExecutor):
         browser_profile_path.mkdir(parents=True, exist_ok=True)
         self.browser_profile_path = browser_profile_path
         
-        # 用户输入管理器
-        self.user_input_manager = UserInputManager(emit_callback=emit_callback)
+        # 🔴 CRITICAL: 停止事件（threading.Event），用于中断长时间操作
+        self.stop_event = threading.Event()
+        
+        # 用户输入管理器（停止检查函数和 stop_event 将在 execute_step 时动态设置）
+        self.user_input_manager = UserInputManager(
+            emit_callback=emit_callback,
+            stop_event=self.stop_event  # 传递 stop_event
+        )
+        self._check_stop_callback: Optional[Callable] = None
         
         # 浏览器状态管理器（Cookie持久化）
         self.state_manager = BrowserStateManager()
@@ -205,7 +222,48 @@ class BrowserExecutor(BaseExecutor):
         """
         try:
             logger.info("正在启动浏览器（headless 后台模式，持久化上下文）...")
-            self.playwright = sync_playwright().start()
+            
+            # === 强制应用 nest_asyncio（如果检测到事件循环）===
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                # 检测到运行中的事件循环
+                logger.info("检测到 asyncio 事件循环，强制应用 nest_asyncio")
+                try:
+                    import nest_asyncio
+                    # 即使之前已经应用过，再次应用也是安全的（幂等操作）
+                    nest_asyncio.apply()
+                    logger.info("✅ nest_asyncio 已应用，允许嵌套事件循环")
+                except ImportError:
+                    error_msg = (
+                        "检测到 asyncio 事件循环，但 nest_asyncio 未安装。"
+                        "请运行: pip install nest-asyncio"
+                    )
+                    logger.error(error_msg)
+                    raise BrowserError(error_msg)
+            except RuntimeError:
+                # 没有运行中的事件循环，可以直接使用同步 API
+                logger.debug("未检测到 asyncio 事件循环，直接使用同步 API")
+                pass
+            
+            # === 正常启动 ===
+            # 注意：即使检测到事件循环，nest_asyncio 应该已经应用，可以正常启动
+            try:
+                self.playwright = sync_playwright().start()
+            except RuntimeError as e:
+                if "asyncio loop" in str(e).lower() or "async" in str(e).lower():
+                    # 如果仍然报错，说明 nest_asyncio 没有生效
+                    error_msg = (
+                        f"Playwright 启动失败: {e}\n"
+                        "即使已应用 nest_asyncio，仍然无法在事件循环中使用同步 API。\n"
+                        "这可能是因为 nest_asyncio 应用时机不对，或者 Playwright 版本问题。\n"
+                        "请尝试：\n"
+                        "1. 确保 nest-asyncio 已安装: pip install nest-asyncio\n"
+                        "2. 升级 Playwright: pip install --upgrade playwright"
+                    )
+                    logger.error(error_msg)
+                    raise BrowserError(error_msg) from e
+                raise
             
             # 使用 launch_persistent_context 创建持久化上下文
             # 这样 Cookie、Session、LocalStorage 等会自动保存和恢复
@@ -242,6 +300,89 @@ class BrowserExecutor(BaseExecutor):
             logger.error(error_msg, exc_info=True)
             raise BrowserError(error_msg) from e
     
+    def _start_in_thread(self) -> None:
+        """
+        在单独的线程中启动 Playwright（避免与 asyncio 事件循环冲突）
+        
+        注意：由于 Playwright 对象不能跨线程使用，此方法会创建一个线程本地存储，
+        所有后续操作都需要在同一个线程中执行。
+        """
+        import queue
+        import threading
+        
+        # 使用线程本地存储来保存 Playwright 对象
+        self._playwright_thread_local = threading.local()
+        
+        result_queue = queue.Queue()
+        error_queue = queue.Queue()
+        
+        def start_playwright():
+            """在单独线程中运行 Playwright 启动代码"""
+            try:
+                playwright = sync_playwright().start()
+                
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self.browser_profile_path),
+                    headless=True,
+                    accept_downloads=True,
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    locale="zh-CN",
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-infobars",
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ]
+                )
+                
+                page = context.new_page()
+                
+                # 将对象保存到线程本地存储
+                self._playwright_thread_local.playwright = playwright
+                self._playwright_thread_local.context = context
+                self._playwright_thread_local.page = page
+                
+                # 将对象放入队列（用于验证启动成功）
+                result_queue.put((playwright, context, page))
+            except Exception as e:
+                error_queue.put(e)
+        
+        # 启动线程
+        thread = threading.Thread(target=start_playwright, daemon=False)
+        thread.start()
+        thread.join(timeout=30)  # 最多等待30秒
+        
+        if thread.is_alive():
+            raise BrowserError("启动浏览器超时（超过30秒）")
+        
+        # 检查错误
+        if not error_queue.empty():
+            error = error_queue.get()
+            raise BrowserError(f"启动浏览器失败: {error}") from error
+        
+        # 获取结果（验证启动成功）
+        if result_queue.empty():
+            raise BrowserError("启动浏览器失败: 线程未返回结果")
+        
+        # 注意：不能直接使用队列中的对象，因为它们属于另一个线程
+        # 我们需要使用线程本地存储中的对象
+        # 但由于后续操作在主线程中，我们需要一个不同的策略
+        
+        # 实际上，Playwright 对象不能跨线程使用
+        # 所以我们需要确保所有操作都在同一个线程中
+        # 但这会导致架构复杂化
+        
+        # 注意：此方法已废弃，因为 Playwright 对象不能跨线程使用
+        # 现在使用 nest_asyncio 来处理 asyncio 事件循环冲突
+        raise BrowserError(
+            "此方法已废弃。请确保已安装 nest_asyncio：pip install nest-asyncio"
+        )
+    
     def stop(self) -> None:
         """停止浏览器实例"""
         try:
@@ -275,6 +416,36 @@ class BrowserExecutor(BaseExecutor):
             logger.info("浏览器未启动，自动在后台启动 headless 浏览器...")
             self.start()
         
+        # 🔴 CRITICAL: 在执行前检查停止标志
+        if context:
+            check_stop = context.get("_check_stop")
+            if check_stop and callable(check_stop):
+                self._check_stop_callback = check_stop
+                if check_stop():
+                    logger.info("任务在执行前已被停止")
+                    from agent.tools.exceptions import TaskInterruptedException
+                    raise TaskInterruptedException("任务已停止")
+        
+        # 🔴 CRITICAL: 在执行前检查停止标志（支持 stop_event 和回调函数）
+        if context:
+            # 优先检查 stop_event（threading.Event）
+            stop_event = context.get("_stop_event")
+            if stop_event and isinstance(stop_event, threading.Event):
+                self.stop_event = stop_event
+                self.user_input_manager.stop_event = stop_event  # 同步更新 UserInputManager
+                if stop_event.is_set():
+                    logger.info("任务在执行前已被停止（通过 stop_event）")
+                    raise TaskInterruptedException("任务已停止")
+            
+            # 检查回调函数（向后兼容）
+            check_stop = context.get("_check_stop")
+            if check_stop and callable(check_stop):
+                self._check_stop_callback = check_stop
+                self.user_input_manager.check_stop = check_stop  # 同步更新 UserInputManager
+                if check_stop():
+                    logger.info("任务在执行前已被停止（通过回调函数）")
+                    raise TaskInterruptedException("任务已停止")
+        
         self._log_execution_start(step)
         step_type = step.get("type")
         params = step.get("params", {})
@@ -307,6 +478,11 @@ class BrowserExecutor(BaseExecutor):
             else:
                 raise BrowserError(f"未知的步骤类型: {step_type}")
                 
+        except TaskInterruptedException as e:
+            logger.info(f"任务已中断: {e}")
+            # 不清理浏览器上下文，因为可能还有其他操作需要浏览器
+            # 只是重新抛出异常，让上层处理
+            raise
         except Exception as e:
             logger.error(f"执行步骤失败: {e}", exc_info=True)
             return {
@@ -342,6 +518,12 @@ class BrowserExecutor(BaseExecutor):
         try:
             logger.info(f"导航到: {url}")
             
+            # 🔴 CRITICAL: 在执行导航前检查停止标志
+            if self.stop_event and self.stop_event.is_set():
+                logger.info("导航操作已停止")
+                from agent.tools.exceptions import TaskInterruptedException
+                raise TaskInterruptedException("任务已停止")
+            
             # 新增：尝试加载保存的 cookies（Cookie 持久化）
             try:
                 if self.state_manager.has_saved_state(url):
@@ -352,10 +534,28 @@ class BrowserExecutor(BaseExecutor):
             except Exception as cookie_err:
                 logger.warning(f"加载 cookies 失败: {cookie_err}")
             
+            # 🔴 CRITICAL: 再次检查停止标志（在 goto 前）
+            if self.stop_event and self.stop_event.is_set():
+                logger.info("导航操作已停止（在 goto 前）")
+                from agent.tools.exceptions import TaskInterruptedException
+                raise TaskInterruptedException("任务已停止")
+            
             self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            
+            # 🔴 CRITICAL: 导航完成后立即检查停止标志
+            if self.stop_event and self.stop_event.is_set():
+                logger.info("导航操作已停止（在 goto 后）")
+                from agent.tools.exceptions import TaskInterruptedException
+                raise TaskInterruptedException("任务已停止")
             
             # 额外等待一下让页面完全渲染
             self.page.wait_for_timeout(1000)
+            
+            # 🔴 CRITICAL: 等待后再次检查停止标志
+            if self.stop_event and self.stop_event.is_set():
+                logger.info("导航操作已停止（在等待后）")
+                from agent.tools.exceptions import TaskInterruptedException
+                raise TaskInterruptedException("任务已停止")
             
             # 尝试关闭常见的弹窗/Cookie提示
             try:
@@ -1400,13 +1600,29 @@ class BrowserExecutor(BaseExecutor):
                     submit_selector = submit_selector or detected.get("submit_selector")
                     logger.info(f"自动检测到登录表单: 用户名={username_selector}, 密码={password_selector}")
             
-            # 请求用户输入
-            credentials = self.user_input_manager.request_login(
-                site_name=site_name,
-                username_label=username_label,
-                password_label=password_label,
-                message=f"请输入您在 {site_name} 的登录信息"
-            )
+            # 🔴 CRITICAL: 更新 UserInputManager 的停止检查函数和 stop_event
+            # 确保在执行前使用最新的 stop_event（可能在执行过程中被更新）
+            if self.stop_event:
+                self.user_input_manager.stop_event = self.stop_event
+            if self._check_stop_callback:
+                self.user_input_manager.check_stop = self._check_stop_callback
+            
+            # 请求用户输入（可能会抛出 TaskInterruptedException）
+            try:
+                credentials = self.user_input_manager.request_login(
+                    site_name=site_name,
+                    username_label=username_label,
+                    password_label=password_label,
+                    message=f"请输入您在 {site_name} 的登录信息"
+                )
+            except TaskInterruptedException as e:
+                # 🔴 CRITICAL: 捕获任务中断异常，返回 success: False，让 TaskOrchestrator 能够正常收尾
+                logger.info(f"登录请求已中断: {e}")
+                return {
+                    "success": False,
+                    "message": "任务已取消",
+                    "data": None
+                }
             
             if not credentials:
                 return {
@@ -1614,6 +1830,12 @@ class BrowserExecutor(BaseExecutor):
             
             logger.info(f"二维码已截图: {qr_screenshot_path}, 大小: {len(qr_base64)} bytes")
             
+            # 🔴 CRITICAL: 更新 UserInputManager 的 stop_event（确保在执行前使用最新的）
+            if self.stop_event:
+                self.user_input_manager.stop_event = self.stop_event
+            if self._check_stop_callback:
+                self.user_input_manager.check_stop = self._check_stop_callback
+            
             # 步骤3: 请求用户扫码
             success = self.user_input_manager.request_qr_login(
                 qr_image=qr_base64,
@@ -1809,6 +2031,12 @@ class BrowserExecutor(BaseExecutor):
                         logger.warning(f"OCR填写失败: {fill_err}，回退到用户输入")
                 else:
                     logger.info("⚠️ OCR识别失败，回退到用户输入")
+            
+            # 🔴 CRITICAL: 更新 UserInputManager 的 stop_event（确保在执行前使用最新的）
+            if self.stop_event:
+                self.user_input_manager.stop_event = self.stop_event
+            if self._check_stop_callback:
+                self.user_input_manager.check_stop = self._check_stop_callback
             
             # OCR不可用或识别失败，回退到用户输入
             # 请求用户输入验证码

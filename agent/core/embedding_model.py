@@ -10,7 +10,8 @@ Shared Embedding Model Manager
 import logging
 import threading
 import time
-from typing import List, Optional
+import os
+from typing import List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,11 @@ class SharedEmbeddingModel:
         self._ready_event = threading.Event()
         self._load_error: Optional[Exception] = None
         self._is_loading = False
+        
+        # 🔴 CRITICAL: 检查是否强制离线模式（通过环境变量）
+        self._force_offline = os.environ.get("HF_HUB_OFFLINE", "").lower() in ("1", "true", "yes")
+        if self._force_offline:
+            logger.info("[SharedModel] 检测到 HF_HUB_OFFLINE=1，将强制使用离线模式")
         
     @classmethod
     def get_instance(cls, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2") -> 'SharedEmbeddingModel':
@@ -64,21 +70,174 @@ class SharedEmbeddingModel:
             # 自动安装依赖
             self._ensure_dependencies()
             
+            # 🔴 CRITICAL: 配置 Hugging Face Hub 环境变量，增强网络稳定性
+            self._configure_hf_environment()
+            
             logger.info(f"[SharedModel] 开始加载嵌入模型: {self.model_name}")
             start = time.time()
             
             # 延迟导入，避免启动时耗时
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
+            
+            # 🔴 CRITICAL: 使用重试机制加载模型，处理网络错误
+            self._model = self._load_model_with_retry(SentenceTransformer)
             
             elapsed = time.time() - start
             logger.info(f"[SharedModel] 模型加载完成，耗时 {elapsed:.1f}s")
         except Exception as e:
             logger.error(f"[SharedModel] 模型加载失败: {e}", exc_info=True)
             self._load_error = e
+            # 🔴 CRITICAL: 即使加载失败，也标记为就绪，避免阻塞其他功能
+            logger.warning("[SharedModel] 模型加载失败，将使用降级方案（意图路由可能受影响）")
         finally:
             self._ready_event.set()
             self._is_loading = False
+    
+    def _configure_hf_environment(self):
+        """配置 Hugging Face Hub 环境变量，增强网络稳定性"""
+        # 设置本地缓存目录（避免重复下载）
+        cache_dir = os.path.expanduser("~/.cache/huggingface")
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # 设置环境变量
+        os.environ.setdefault("HF_HOME", cache_dir)
+        os.environ.setdefault("TRANSFORMERS_CACHE", cache_dir)
+        os.environ.setdefault("HF_HUB_CACHE", cache_dir)
+        
+        # 🔴 CRITICAL: 增加超时和重试配置
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")  # 5分钟超时
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "10")  # ETag 超时
+        
+        # 禁用进度条（避免输出干扰）
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        
+        # 🔴 CRITICAL: 优先使用本地缓存，如果本地有模型则强制离线模式
+        # 检查本地是否有模型缓存
+        model_cache_path = os.path.join(cache_dir, "hub", "models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2")
+        if os.path.exists(model_cache_path):
+            logger.info("[SharedModel] 检测到本地模型缓存，将优先使用离线模式")
+            # 不设置 HF_HUB_OFFLINE=1，因为我们需要检查是否有完整模型
+            # 但如果网络失败，会在重试时尝试离线模式
+        
+        logger.debug(f"[SharedModel] Hugging Face 缓存目录: {cache_dir}")
+    
+    def _load_model_with_retry(self, SentenceTransformer: Any, max_retries: int = 3) -> Any:
+        """
+        使用重试机制加载模型，处理网络错误
+        
+        Args:
+            SentenceTransformer: SentenceTransformer 类
+            max_retries: 最大重试次数
+            
+        Returns:
+            SentenceTransformer 实例
+            
+        Raises:
+            Exception: 如果所有重试都失败
+        """
+        last_error = None
+        cache_folder = os.path.expanduser("~/.cache/huggingface")
+        
+        # 🔴 CRITICAL: 如果强制离线模式，直接使用离线模式
+        if self._force_offline:
+            logger.info("[SharedModel] 强制离线模式，直接使用本地缓存...")
+            try:
+                model = SentenceTransformer(
+                    self.model_name,
+                    cache_folder=cache_folder,
+                    device="cpu"
+                )
+                logger.info("[SharedModel] ✅ 离线模式加载成功")
+                return model
+            except Exception as offline_error:
+                logger.error(f"[SharedModel] ❌ 离线模式失败（本地可能没有完整缓存）: {offline_error}")
+                raise RuntimeError(
+                    f"离线模式加载失败: {offline_error}\n"
+                    f"💡 请先在线下载模型，或手动下载到 ~/.cache/huggingface/"
+                ) from offline_error
+        
+        # 🔴 CRITICAL: 首先尝试离线模式（如果本地有缓存）
+        try:
+            logger.info("[SharedModel] 首先尝试离线模式加载（如果本地有缓存）...")
+            os.environ["HF_HUB_OFFLINE"] = "1"  # 临时强制离线模式
+            model = SentenceTransformer(
+                self.model_name,
+                cache_folder=cache_folder,
+                device="cpu"
+            )
+            logger.info("[SharedModel] ✅ 离线模式加载成功（使用本地缓存）")
+            os.environ.pop("HF_HUB_OFFLINE", None)  # 恢复在线模式
+            return model
+        except Exception as offline_error:
+            # 离线模式失败，继续尝试在线模式
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            logger.debug(f"[SharedModel] 离线模式失败（可能没有本地缓存）: {offline_error}")
+        
+        # 在线模式重试
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"[SharedModel] 尝试在线加载模型 (尝试 {attempt}/{max_retries})...")
+                
+                # 🔴 CRITICAL: 每次重试都创建新的 HTTP 客户端（避免客户端关闭问题）
+                # 通过设置环境变量强制创建新客户端
+                os.environ.pop("HF_HUB_OFFLINE", None)  # 确保在线模式
+                
+                model = SentenceTransformer(
+                    self.model_name,
+                    cache_folder=cache_folder,
+                    device="cpu"  # 先使用 CPU，避免 MPS 设备问题
+                )
+                
+                logger.info(f"[SharedModel] ✅ 模型加载成功 (尝试 {attempt})")
+                return model
+                
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                
+                # 检查是否是网络相关错误
+                is_network_error = any(keyword in error_msg.lower() for keyword in [
+                    "ssl", "eof", "connection", "timeout", "closed", "http", "network", "client"
+                ])
+                
+                if is_network_error:
+                    logger.warning(f"[SharedModel] 网络错误 (尝试 {attempt}/{max_retries}): {error_msg[:100]}")
+                    if attempt < max_retries:
+                        # 指数退避：2秒、4秒、8秒（增加等待时间）
+                        wait_time = 2 ** attempt
+                        logger.info(f"[SharedModel] 等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    # 非网络错误，直接抛出
+                    logger.error(f"[SharedModel] 非网络错误，停止重试: {error_msg}")
+                    raise
+        
+        # 🔴 CRITICAL: 所有在线重试都失败，最后尝试一次离线模式
+        logger.warning("[SharedModel] 所有在线重试失败，最后尝试离线模式...")
+        try:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            model = SentenceTransformer(
+                self.model_name,
+                cache_folder=cache_folder,
+                device="cpu"
+            )
+            logger.info("[SharedModel] ✅ 最后尝试离线模式成功（使用不完整的本地缓存）")
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            return model
+        except Exception as final_error:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            logger.error(f"[SharedModel] ❌ 离线模式也失败: {final_error}")
+        
+        # 所有尝试都失败
+        logger.error(f"[SharedModel] ❌ 模型加载完全失败，已重试 {max_retries} 次在线 + 2 次离线")
+        raise RuntimeError(
+            f"模型加载失败（已重试 {max_retries} 次在线 + 2 次离线）: {last_error}\n"
+            f"💡 建议：\n"
+            f"1. 检查网络连接\n"
+            f"2. 手动下载模型到 ~/.cache/huggingface/\n"
+            f"3. 或使用离线模式：设置环境变量 HF_HUB_OFFLINE=1"
+        ) from last_error
 
     def _ensure_dependencies(self):
         """确保 sentence-transformers 已安装"""
@@ -99,10 +258,24 @@ class SharedEmbeddingModel:
                 raise
 
     def wait_until_ready(self, timeout: float = 60.0) -> bool:
-        """等待模型就绪"""
+        """
+        等待模型就绪
+        
+        Args:
+            timeout: 超时时间（秒）
+            
+        Returns:
+            True 如果模型已就绪，False 如果超时或加载失败
+        """
         if self._model is not None:
             return True
-        return self._ready_event.wait(timeout=timeout)
+        
+        # 等待加载完成（或超时）
+        is_ready = self._ready_event.wait(timeout=timeout)
+        
+        # 🔴 CRITICAL: 即使加载失败，也返回 True（避免阻塞），但会在 encode 时返回空列表
+        # 这样可以让系统继续运行，只是意图路由功能会降级
+        return is_ready
 
     def encode(self, text: str) -> List[float]:
         """

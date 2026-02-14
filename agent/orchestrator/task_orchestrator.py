@@ -138,10 +138,51 @@ class TaskOrchestrator:
             }
             
         # 4. 执行计划 (Executor)
-        # 确保 context 中包含停止检查函数
+        # 🔴 CRITICAL: 确保 context 中包含停止检查函数和 stop_event
         check_stop = context.get("_check_stop")
         if check_stop:
             context["_check_stop"] = check_stop
+        
+        # 🔴 CRITICAL: 传递 stop_event 给所有 executor（如果存在）
+        stop_event = context.get("_stop_event")
+        if stop_event:
+            context["_stop_event"] = stop_event
+            # 设置 PlanExecutor 中所有 executor 的 stop_event
+            if hasattr(self.executor, 'tools'):
+                for executor_name, executor_instance in self.executor.tools.items():
+                    if hasattr(executor_instance, 'stop_event'):
+                        executor_instance.stop_event = stop_event
+                        logger.debug(f"已设置 {executor_name} 的 stop_event")
+        
+        # 🔴 CRITICAL: 规划完成后，立即 emit "executing" 事件，通知前端进入执行阶段
+        emit("executing", {
+            "step_count": len(plan_steps),
+            "current_step": 0,
+            "total_steps": len(plan_steps),
+            "message": "开始执行计划"
+        })
+        
+        # 🔴 CRITICAL: 在执行前再次检查停止标志
+        import threading
+        if stop_event and isinstance(stop_event, threading.Event) and stop_event.is_set():
+            logger.info("任务在执行前已被停止（通过 stop_event）")
+            return {
+                "success": False,
+                "message": "任务已取消",
+                "steps": [],
+                "user_instruction": user_instruction
+            }
+        
+        check_stop = context.get("_check_stop")
+        if check_stop and callable(check_stop) and check_stop():
+            logger.info("任务在执行前已被停止（通过检查函数）")
+            return {
+                "success": False,
+                "message": "任务已取消",
+                "steps": [],
+                "user_instruction": user_instruction
+            }
+        
         result = self.executor.execute_plan(
             plan=plan_steps,
             user_instruction=user_instruction,

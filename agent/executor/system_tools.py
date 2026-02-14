@@ -132,6 +132,67 @@ class SystemTools(BaseExecutor):
         logger.warning(f"未找到文件夹: {folder_name}")
         return None
     
+    def _sanitize_app_name(self, app_name: str) -> str:
+        """
+        清理应用名：移除常见的动作词和后续操作
+        
+        例如：
+        - "打开企业微信" → "企业微信"
+        - "启动Safari" → "Safari"
+        - "运行计算器然后输入" → "计算器"
+        
+        Args:
+            app_name: 原始应用名（可能包含动作词）
+            
+        Returns:
+            清理后的应用名
+        """
+        import re
+        
+        if not app_name:
+            return app_name
+        
+        app_name = app_name.strip()
+        
+        # 定义动作词（打开/启动/运行等）
+        open_keywords = ["打开", "启动", "运行", "开启", "open", "launch", "start", "run"]
+        close_keywords = ["关闭", "退出", "结束", "停止", "close", "quit", "exit", "stop", "kill"]
+        all_keywords = open_keywords + close_keywords
+        
+        # 模式1: 移除开头的动作词 + 空格
+        # 例如："打开 企业微信" → "企业微信"
+        pattern1 = r'^(?:' + '|'.join(re.escape(kw) for kw in all_keywords) + r')\s+(.+)$'
+        match1 = re.match(pattern1, app_name, re.IGNORECASE)
+        if match1:
+            app_name = match1.group(1).strip()
+            logger.debug(f"[清理应用名] 模式1匹配: 提取 '{app_name}'")
+        else:
+            # 模式2: 移除开头的动作词（无空格）
+            # 例如："打开企业微信" → "企业微信"
+            pattern2 = r'^(?:' + '|'.join(re.escape(kw) for kw in all_keywords) + r')(.+)$'
+            match2 = re.match(pattern2, app_name, re.IGNORECASE)
+            if match2:
+                app_name = match2.group(1).strip()
+                logger.debug(f"[清理应用名] 模式2匹配: 提取 '{app_name}'")
+        
+        # 移除可能的后续操作（如"然后"、"并"、"和"等）
+        # 例如："企业微信然后输入" → "企业微信"
+        app_name = re.split(r'[然后并和,，再接着]', app_name)[0].strip()
+        
+        # 移除常见的控制关键词（如果应用名中包含这些，可能是AI理解错误）
+        control_keywords = ["控制", "输入", "搜索", "按", "点击", "键盘", "鼠标"]
+        for kw in control_keywords:
+            if kw in app_name:
+                # 如果应用名中包含控制关键词，尝试提取关键词之前的部分
+                # 例如："企业微信控制键盘" → "企业微信"
+                parts = app_name.split(kw)
+                if parts[0].strip():
+                    app_name = parts[0].strip()
+                    logger.warning(f"检测到控制关键词 '{kw}'，提取应用名: '{app_name}'")
+                    break
+        
+        return app_name
+    
     def execute_step(self, step: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行系统操作步骤
@@ -944,6 +1005,22 @@ class SystemTools(BaseExecutor):
         if not app_name:
             raise BrowserError("缺少app_name参数")
         
+        # === 自动清理应用名：移除常见的动作词 ===
+        # 如果 AI 把整个指令（如"打开企业微信"）当作应用名，自动提取真正的应用名
+        app_name_original = str(app_name)  # 确保是字符串
+        app_name_cleaned = self._sanitize_app_name(app_name_original)
+        
+        if app_name_cleaned != app_name_original:
+            logger.warning(f"🔧 自动清理应用名: '{app_name_original}' → '{app_name_cleaned}'")
+            app_name = app_name_cleaned
+            # 更新 params 中的 app_name，确保后续逻辑使用清理后的名称
+            params["app_name"] = app_name
+        else:
+            logger.debug(f"应用名无需清理: '{app_name}'")
+            app_name = app_name_cleaned
+        
+        logger.info(f"📱 准备打开应用程序: '{app_name}'")
+        
         platform = sys.platform
         
         try:
@@ -1089,6 +1166,14 @@ class SystemTools(BaseExecutor):
         app_name = params.get("app_name")
         if not app_name:
             raise BrowserError("缺少app_name参数")
+        
+        # === 自动清理应用名：移除常见的动作词 ===
+        app_name_original = app_name
+        app_name = self._sanitize_app_name(app_name)
+        if app_name != app_name_original:
+            logger.info(f"🔧 自动清理应用名: '{app_name_original}' → '{app_name}'")
+            # 更新 params 中的 app_name
+            params["app_name"] = app_name
         
         # === 新增：类型检查守卫（最后防线）===
         # 检查是否包含文件路径特征，防止误将文件路径当作应用名称

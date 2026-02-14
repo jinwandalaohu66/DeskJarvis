@@ -11,6 +11,15 @@ DeskJarvis Agent主入口 - 智能化重构版 (Facade)
 遵循 docs/ARCHITECTURE.md 中的架构设计
 """
 
+# === 在导入任何其他模块之前应用 nest_asyncio ===
+# 这允许 Playwright 的同步 API 在 asyncio 事件循环中使用
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    # nest_asyncio 未安装，会在浏览器启动时给出明确错误提示
+    pass
+
 import sys
 import logging
 import time
@@ -248,13 +257,31 @@ class DeskJarvisAgent:
                 "description": f"快路径执行: {intent_type}",
             }
             
+            # 特殊处理：system_control 类型映射到具体操作类型
+            if metadata.get("type") == "system_control":
+                action = metadata.get("action", "")
+                if action == "volume":
+                    step["type"] = "set_volume"
+                    # 尝试从指令中解析音量值或操作
+                    step["params"] = self._parse_volume_params(user_instruction)
+                elif action == "brightness":
+                    step["type"] = "set_brightness"
+                    # 尝试从指令中解析亮度值或操作
+                    step["params"] = self._parse_brightness_params(user_instruction)
+                elif action == "sys_info":
+                    step["type"] = "get_system_info"
+                    step["params"] = {"info_type": "all"}
+                else:
+                    logger.warning(f"[SECURITY_SHIELD] 未知的 system_control action: {action}，回退到正常规划")
+                    return None
+            
             # 特殊处理：文本处理
-            if metadata.get("type") == "text_process":
+            elif metadata.get("type") == "text_process":
                 step["params"]["text"] = user_instruction
                 step["params"]["target_lang"] = "English"
             
             # 特殊处理：应用操作
-            if intent_type in ["app_open", "app_close"]:
+            elif intent_type in ["app_open", "app_close"]:
                 # 从 TaskOrchestrator 借用应用名提取逻辑
                 app_name = self._extract_app_name(user_instruction)
                 if app_name:
@@ -308,6 +335,87 @@ class DeskJarvisAgent:
             return instruction.strip()
         
         return None
+    
+    def _parse_volume_params(self, instruction: str) -> Dict[str, Any]:
+        """
+        从用户指令中解析音量参数
+        
+        Args:
+            instruction: 用户指令
+            
+        Returns:
+            音量参数字典，包含 level 或 action
+        """
+        import re
+        
+        instruction_lower = instruction.lower()
+        
+        # 检查静音/取消静音
+        if any(kw in instruction_lower for kw in ["静音", "mute", "关闭声音", "关声音"]):
+            return {"action": "mute"}
+        if any(kw in instruction_lower for kw in ["取消静音", "unmute", "打开声音", "开声音"]):
+            return {"action": "unmute"}
+        
+        # 检查调大/调小
+        if any(kw in instruction_lower for kw in ["调大", "增大", "增加", "up", "increase", "raise"]):
+            return {"action": "up"}
+        if any(kw in instruction_lower for kw in ["调小", "减小", "降低", "down", "decrease", "lower", "降低"]):
+            return {"action": "down"}
+        
+        # 尝试提取具体数值（0-100）
+        numbers = re.findall(r'\d+', instruction)
+        if numbers:
+            level = int(numbers[0])
+            if 0 <= level <= 100:
+                return {"level": level}
+        
+        # 默认调大
+        return {"action": "up"}
+    
+    def _parse_brightness_params(self, instruction: str) -> Dict[str, Any]:
+        """
+        从用户指令中解析亮度参数
+        
+        Args:
+            instruction: 用户指令
+            
+        Returns:
+            亮度参数字典，包含 level 或 action
+        """
+        import re
+        
+        instruction_lower = instruction.lower()
+        
+        # 检查最亮/最暗
+        if any(kw in instruction_lower for kw in ["最亮", "最亮", "max", "maximum", "brightest"]):
+            return {"action": "max"}
+        if any(kw in instruction_lower for kw in ["最暗", "最暗", "min", "minimum", "darkest"]):
+            return {"action": "min"}
+        
+        # 检查调亮/调暗
+        if any(kw in instruction_lower for kw in ["调亮", "调高", "增加", "up", "increase", "raise", "brighten"]):
+            return {"action": "up"}
+        if any(kw in instruction_lower for kw in ["调暗", "调低", "降低", "down", "decrease", "lower", "dim"]):
+            return {"action": "down"}
+        
+        # 尝试提取百分比数值（0-100）
+        percent_match = re.search(r'(\d+)%', instruction)
+        if percent_match:
+            percent = int(percent_match.group(1))
+            if 0 <= percent <= 100:
+                return {"level": percent / 100.0}
+        
+        # 尝试提取小数（0.0-1.0）
+        float_match = re.search(r'(\d+\.?\d*)', instruction)
+        if float_match:
+            level = float(float_match.group(1))
+            if 0.0 <= level <= 1.0:
+                return {"level": level}
+            elif 0 <= level <= 100:
+                return {"level": level / 100.0}
+        
+        # 默认调亮
+        return {"action": "up"}
 
     def execute(
         self, 
@@ -349,6 +457,9 @@ class DeskJarvisAgent:
                 'plan_ready': 'thinking',  # 规划完成也算 thinking
                 'sensitive_operation_detected': 'thinking',  # 敏感操作检测也算 thinking
                 'error': 'error',
+                # 🔴 CRITICAL: 用户输入相关事件必须透传，不被过滤
+                'request_input': 'request_input',  # 用户输入请求（登录、验证码等）
+                'waiting_for_input': 'waiting_for_input',  # 等待用户输入心跳
             }
             return event_mapping.get(event_type, None)
         
@@ -356,6 +467,11 @@ class DeskJarvisAgent:
         def sanitize_event_data(event_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
             """精简事件数据，移除技术细节"""
             sanitized = {}
+            
+            # 🔴 CRITICAL: 用户输入相关事件必须完整透传，不进行精简
+            if event_type in ['request_input', 'waiting_for_input']:
+                # 完整透传用户输入请求数据，确保前端能正确显示
+                return data
             
             if event_type == 'thinking':
                 # thinking 事件：只保留 phase 和简洁摘要
@@ -461,6 +577,10 @@ class DeskJarvisAgent:
             if progress_callback:
                 try:
                     progress_callback(event)
+                    # 🔴 CRITICAL: 对于关键事件（如 request_input），确保立即刷新
+                    if mapped_type in ['request_input', 'waiting_for_input']:
+                        import sys
+                        sys.stdout.flush()  # 立即刷新 stdout，确保消息立即发送
                 except Exception as e:
                     logger.error(f"[SECURITY_SHIELD] 进度回调失败: {e}")
             else:

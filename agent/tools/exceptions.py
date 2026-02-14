@@ -71,3 +71,12 @@ class PlaceholderError(DeskJarvisError):
         super().__init__(message)
         self.placeholder = placeholder
         self.step = step
+
+
+class TaskInterruptedException(DeskJarvisError):
+    """
+    任务中断异常：当任务被用户停止时抛出
+    
+    用于在等待用户输入或其他长时间操作时响应停止信号。
+    """
+    pass
